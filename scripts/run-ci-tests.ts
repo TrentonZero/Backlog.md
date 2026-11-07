@@ -74,7 +74,10 @@ if (profile === "platform") {
 	process.exit(await runBunTest(PLATFORM_CONTRACT_FILES, forwardedArguments, { skipDomPreload: true }));
 }
 
-const allTestFiles = [...new Bun.Glob("src/**/*.test.{ts,tsx}").scanSync()]
+const allTestFiles = [
+	...new Bun.Glob("src/**/*.test.{ts,tsx}").scanSync(),
+	...new Bun.Glob("scripts/migration/**/*.test.ts").scanSync(),
+]
 	.map((file) => file.replaceAll("\\", "/"))
 	.sort();
 
