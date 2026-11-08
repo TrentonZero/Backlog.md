@@ -137,9 +137,12 @@ fn preprocess(yaml: &str) -> String {
 }
 
 fn parse_yaml(yaml: &str) -> Result<Map<String, Value>, FrontmatterError> {
-    let mut parsed: serde_yaml_ng::Value =
-        serde_yaml_ng::from_str(&canonical_integers(&preprocess(yaml))?)
-            .map_err(|error| FrontmatterError::InvalidYaml(error.to_string()))?;
+    parse_yaml_mapping(&preprocess(yaml))
+}
+
+pub(crate) fn parse_yaml_mapping(yaml: &str) -> Result<Map<String, Value>, FrontmatterError> {
+    let mut parsed: serde_yaml_ng::Value = serde_yaml_ng::from_str(&canonical_integers(yaml)?)
+        .map_err(|error| FrontmatterError::InvalidYaml(error.to_string()))?;
     parsed
         .apply_merge()
         .map_err(|error| FrontmatterError::InvalidYaml(error.to_string()))?;
@@ -294,4 +297,67 @@ pub fn update_frontmatter(
         ),
         None => format!("---\n{edited}---\n{source}"),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FrontmatterError, parse_frontmatter, parse_yaml_mapping};
+    use serde_json::json;
+
+    #[test]
+    fn raw_yaml_preserves_bare_integer_and_explicit_string_types() {
+        for (scalar, expected) in [
+            ("007", json!(7)),
+            ("'007'", json!("007")),
+            ("\"007\"", json!("007")),
+            ("!!str 007", json!("007")),
+        ] {
+            assert_eq!(
+                parse_yaml_mapping(&format!("default_assignee: {scalar}\n")).unwrap()["default_assignee"],
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn raw_yaml_does_not_accept_record_assignee_conventions() {
+        for key in ["default_assignee", "assignee", "reporter"] {
+            assert!(matches!(
+                parse_yaml_mapping(&format!("{key}: @alex\n")),
+                Err(FrontmatterError::InvalidYaml(_))
+            ));
+        }
+        assert_eq!(
+            parse_frontmatter("---\nassignee: @alex\n---\n")
+                .unwrap()
+                .data["assignee"],
+            "@alex"
+        );
+    }
+
+    #[test]
+    fn raw_yaml_does_not_apply_record_due_date_coercion() {
+        assert_eq!(
+            parse_yaml_mapping("due_date: 007\n").unwrap()["due_date"],
+            json!(7)
+        );
+        assert_eq!(
+            parse_frontmatter("---\ndue_date: 007\n---\n").unwrap().data["due_date"],
+            "007"
+        );
+    }
+
+    #[test]
+    fn raw_yaml_resolves_external_merges_and_requires_mapping_or_null_roots() {
+        let parsed = parse_yaml_mapping(
+            "defaults: &defaults {default_assignee: ['@alex']}\n<<: *defaults\n",
+        )
+        .unwrap();
+        assert_eq!(parsed["default_assignee"], json!(["@alex"]));
+        assert!(parse_yaml_mapping("null\n").unwrap().is_empty());
+        assert!(matches!(
+            parse_yaml_mapping("text\n"),
+            Err(FrontmatterError::ExpectedMapping)
+        ));
+    }
 }
