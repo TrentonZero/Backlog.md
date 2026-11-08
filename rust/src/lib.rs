@@ -2,6 +2,7 @@
 pub mod config;
 pub mod discovery;
 pub mod frontmatter;
+pub mod identity;
 pub mod records;
 pub mod sections;
 pub mod serialization;

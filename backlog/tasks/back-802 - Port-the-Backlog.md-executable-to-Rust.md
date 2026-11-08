@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@codex'
 created_date: '2026-11-07T21:53:00Z'
-updated_date: '2026-11-08T20:47:00Z'
+updated_date: '2026-11-08T20:53:00Z'
 labels: []
 dependencies:
   - BACK-801
@@ -18,10 +18,11 @@ references:
   - BACK-802.5
   - BACK-802.6
   - BACK-802.7
+  - BACK-802.8
 modified_files:
   - >-
-    backlog/tasks/back-802.7 -
-    Port-durable-record-storage-and-compatible-locks-to-Rust.md
+    backlog/tasks/back-802.8 -
+    Port-task-ID-normalization-and-allocation-to-Rust.md
 type: feature
 ordinal: 408000
 ---
@@ -68,4 +69,8 @@ BACK-802.6 is complete and pushed. Pure Rust serializers now cover task, decisio
 BACK-802.6 is complete and pushed. BACK-802.7 is active for durable record storage and locks compatible with the current executable.
 
 BACK-802.7 is complete and pushed. Rust now provides source-preserving explicit-path storage, no-overwrite creation/moves, and proper-lockfile-compatible create/entity locks. Next: port identity, Git integration, and application operations.
+
+BACK-802.7 is complete and pushed. BACK-802.8 is active for pure task-ID normalization and allocation helpers.
+
+BACK-802.8 is complete; Rust now matches task ID normalization, equality and allocation helpers. Next: shared entity resolution and ambiguous-ID refusal across tasks, decisions and documents.
 <!-- SECTION:NOTES:END -->
