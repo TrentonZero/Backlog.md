@@ -2,4 +2,5 @@
 pub mod config;
 pub mod discovery;
 pub mod frontmatter;
+pub mod records;
 pub mod sections;

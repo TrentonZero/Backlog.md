@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@codex'
 created_date: '2026-11-07T21:53:00Z'
-updated_date: '2026-11-08T19:34:00Z'
+updated_date: '2026-11-08T19:37:00Z'
 labels: []
 dependencies:
   - BACK-801
@@ -15,11 +15,13 @@ references:
   - rust/README.md
   - BACK-802.3
   - BACK-802.4
+  - BACK-802.5
 modified_files:
   - >-
     backlog/tasks/back-802.3 -
     Port-native-configuration-parsing-and-defaults-to-Rust.md
   - backlog/tasks/back-802.4 - Port-project-directory-discovery-to-Rust.md
+  - backlog/tasks/back-802.5 - Port-typed-Markdown-record-parsers-to-Rust.md
 type: feature
 ordinal: 408000
 ---
