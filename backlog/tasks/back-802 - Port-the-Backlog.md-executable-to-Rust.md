@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@codex'
 created_date: '2026-11-07T21:53:00Z'
-updated_date: '2026-11-08T23:47:00Z'
+updated_date: '2026-11-08T23:58:00Z'
 labels: []
 dependencies:
   - BACK-801
@@ -27,6 +27,9 @@ modified_files:
   - >-
     backlog/tasks/back-802.14 -
     Port-branch-snapshot-task-ID-reservation-to-Rust.md
+  - >-
+    backlog/tasks/back-802.15 -
+    Port-remote-branch-task-ID-reservation-to-Rust.md
   - rust/src/git.rs
   - rust/src/task_store.rs
   - rust/tests/task_store.rs
@@ -69,5 +72,5 @@ Continue the eight stages in docs/superpowers/specs/2026-11-07-rust-migration-de
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Completed stages: BACK-802.1 managed sections, BACK-802.2 Rust CI, BACK-802.3 config parsing/defaults, BACK-802.4 native discovery, BACK-802.5 typed record parsing, BACK-802.6 record serialization, BACK-802.7 storage and compatible locks, BACK-802.8 task ID normalization/allocation, BACK-802.9 shared entity identity and ambiguity resolution, BACK-802.10 Git repository/worktree discovery, BACK-802.11 filename ID reservation across worktrees, BACK-802.12 local task listing/lookup, BACK-802.13 local task create/update, BACK-802.14 local branch snapshot reservation. Windows execution remains unchecked; GitHub reports zero Actions runs.\n\nOverall executable migration remains In Progress. Remote-ref reservations, broader Rust domain operations, CLI behavior, browser server, MCP, TUI, and distribution/cutover gates remain outstanding.\n\nBACK-802.10 added Git repository roots, branch names, and linked worktree discovery. BACK-802.11 added active/archive task filename ID reservations across the current project and linked worktrees. BACK-802.12 added local task listing and identity-safe lookup with TypeScript parity. BACK-802.13 added locked local task creation and updates with source-preserving writes. BACK-802.14 added allocation from configured recent local branch snapshots under the create lock, with settings, current-branch exclusion, and age cutoff matching TypeScript. Checks and required reviews passed; remote-ref reservation remains a follow-up.
+Completed stages: BACK-802.1 managed sections, BACK-802.2 Rust CI, BACK-802.3 config parsing/defaults, BACK-802.4 native discovery, BACK-802.5 typed record parsing, BACK-802.6 record serialization, BACK-802.7 storage and compatible locks, BACK-802.8 task ID normalization/allocation, BACK-802.9 shared entity identity and ambiguity resolution, BACK-802.10 Git repository/worktree discovery, BACK-802.11 filename ID reservation across worktrees, BACK-802.12 local task listing/lookup, BACK-802.13 local task create/update, BACK-802.14 local branch snapshot reservation, BACK-802.15 remote branch snapshot reservation. Windows execution remains unchecked; GitHub reports zero Actions runs.\n\nOverall executable migration remains In Progress. Broader Rust domain operations, CLI behavior, browser server, MCP, TUI, and distribution/cutover gates remain outstanding.\n\nBACK-802.10 added Git repository roots, branch names, and linked worktree discovery. BACK-802.11 added active/archive task filename ID reservations across the current project and linked worktrees. BACK-802.12 added local task listing and identity-safe lookup with TypeScript parity. BACK-802.13 added locked local task creation and updates with source-preserving writes. BACK-802.14 added allocation from configured recent local branch snapshots. BACK-802.15 added bounded origin refresh and task/archive filename reservation across recent remote branches, respecting branch scan settings. Rust and focused Bun compatibility checks passed; cold simplicity and full-context complexity reviews found no blockers.
 <!-- SECTION:NOTES:END -->

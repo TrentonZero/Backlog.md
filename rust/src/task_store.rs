@@ -274,9 +274,16 @@ impl TaskStore {
         }
 
         let git = GitRepository::new(&self.project_root);
+        let include_origin = config.remote_operations != Some(false);
+        if include_origin {
+            // Remote refresh failures are non-fatal; the TypeScript allocator uses
+            // whatever refs are available when fetching cannot complete.
+            git.fetch_origin();
+        }
         let current_branch = git.current_branch();
         let mut ids = Vec::new();
-        for tip in git.recent_local_branch_tips(config.active_branch_days.unwrap_or(30.0)) {
+        for tip in git.recent_branch_tips(config.active_branch_days.unwrap_or(30.0), include_origin)
+        {
             if tip.current || tip.name == current_branch {
                 continue;
             }

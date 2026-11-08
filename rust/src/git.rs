@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 use std::process::{Command, Output};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GitBranchTip {
@@ -65,13 +65,65 @@ impl GitRepository {
         })
     }
 
-    /// List current and recent local branches in a stable order.
-    pub fn recent_local_branch_tips(&self, active_branch_days: f64) -> Vec<GitBranchTip> {
-        let Some(output) = self.run(&[
+    /// Refresh the configured origin using the repository's Git transport settings.
+    pub fn fetch_origin(&self) -> bool {
+        let Some(remote) = self.run(&["remote", "get-url", "origin"]) else {
+            return false;
+        };
+        if !remote.status.success() || String::from_utf8_lossy(&remote.stdout).trim().is_empty() {
+            return false;
+        }
+        let Ok(mut child) = Command::new(&self.executable)
+            .args([
+                "fetch",
+                "origin",
+                "--prune",
+                "--quiet",
+                "--no-recurse-submodules",
+            ])
+            .current_dir(&self.project_root)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GCM_INTERACTIVE", "Never")
+            .stdin(std::process::Stdio::null())
+            .spawn()
+        else {
+            return false;
+        };
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => return status.success(),
+                Err(_) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return false;
+                }
+                Ok(None) => {}
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    }
+
+    /// List current and recent local and configured origin branches in a stable order.
+    pub fn recent_branch_tips(
+        &self,
+        active_branch_days: f64,
+        include_origin: bool,
+    ) -> Vec<GitBranchTip> {
+        let mut args = vec![
             "for-each-ref",
             "--format=%(HEAD)%00%(refname:short)%00%(objectname)%00%(committerdate:unix)",
             "refs/heads",
-        ]) else {
+        ];
+        if include_origin {
+            args.push("refs/remotes/origin");
+        }
+        let Some(output) = self.run(&args) else {
             return Vec::new();
         };
         if !output.status.success() {
@@ -93,6 +145,7 @@ impl GitRepository {
                 let current = head.trim() == "*";
                 (!name.is_empty()
                     && !commit.is_empty()
+                    && name != "origin/HEAD"
                     && (current || committed_at as f64 >= cutoff))
                     .then(|| GitBranchTip {
                         name: name.to_owned(),

@@ -325,6 +325,163 @@ fn branch_snapshot_ids_match_live_typescript_settings() {
     }
 }
 
+#[test]
+fn remote_branch_ids_match_live_typescript_refresh_and_settings() {
+    let fixture = Fixture::new();
+
+    let typescript_root = fixture.0.join("typescript-remote");
+    let rust_root = fixture.0.join("rust-remote");
+    let source = setup_remote_snapshot(&fixture.0, &typescript_root, &rust_root, false);
+    run_git(&source, &["switch", "-q", "feature"], None);
+    let pushed_task = source.join("backlog/tasks/task-16 - Pushed after clone.md");
+    std::fs::write(&pushed_task, "malformed after clone").unwrap();
+    run_git(&source, &["add", "."], None);
+    run_git(&source, &["commit", "-qm", "push after clone"], None);
+    run_git(&source, &["push", "-q", "origin", "feature"], None);
+    run_git(&source, &["switch", "-q", "main"], None);
+
+    let expected = reference(&typescript_root);
+    let store = TaskStore::new(&rust_root, "backlog", "task");
+    let created = store
+        .create_task(initial_task(), &Config::default())
+        .unwrap();
+    assert_eq!(expected["id"], "TASK-18");
+    assert_eq!(created.task.id, "TASK-18");
+
+    let disabled_typescript = fixture.0.join("typescript-disabled");
+    let disabled_rust = fixture.0.join("rust-disabled");
+    setup_remote_snapshot(&fixture.0, &disabled_typescript, &disabled_rust, false);
+    let config_path = disabled_typescript.join("backlog/config.yml");
+    std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+    std::fs::write(&config_path, "remote_operations: false\n").unwrap();
+    let expected = reference(&disabled_typescript);
+    let config = Config {
+        remote_operations: Some(false),
+        ..Config::default()
+    };
+    let created = TaskStore::new(&disabled_rust, "backlog", "task")
+        .create_task(initial_task(), &config)
+        .unwrap();
+    assert_eq!(expected["id"], "TASK-2");
+    assert_eq!(created.task.id, "TASK-2");
+
+    let stale_typescript = fixture.0.join("typescript-stale-remote");
+    let stale_rust = fixture.0.join("rust-stale-remote");
+    setup_remote_snapshot(&fixture.0, &stale_typescript, &stale_rust, true);
+    let expected = reference(&stale_typescript);
+    let config = Config {
+        active_branch_days: Some(30.0),
+        ..Config::default()
+    };
+    let created = TaskStore::new(&stale_rust, "backlog", "task")
+        .create_task(initial_task(), &config)
+        .unwrap();
+    assert_eq!(expected["id"], "TASK-2");
+    assert_eq!(created.task.id, "TASK-2");
+
+    let filesystem_typescript = fixture.0.join("typescript-filesystem-only");
+    let filesystem_rust = fixture.0.join("rust-filesystem-only");
+    setup_remote_snapshot(&fixture.0, &filesystem_typescript, &filesystem_rust, false);
+    let config_path = filesystem_typescript.join("backlog/config.yml");
+    std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+    std::fs::write(&config_path, "filesystem_only: true\n").unwrap();
+    let expected = reference(&filesystem_typescript);
+    let config = Config {
+        filesystem_only: Some(true),
+        ..Config::default()
+    };
+    let created = TaskStore::new(&filesystem_rust, "backlog", "task")
+        .create_task(initial_task(), &config)
+        .unwrap();
+    assert_eq!(expected["id"], "TASK-2");
+    assert_eq!(created.task.id, "TASK-2");
+}
+
+fn setup_remote_snapshot(
+    parent: &Path,
+    typescript_root: &Path,
+    rust_root: &Path,
+    stale: bool,
+) -> std::path::PathBuf {
+    let source = parent.join(format!(
+        "remote-source-{}",
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    let origin = parent.join(format!(
+        "remote-origin-{}",
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(&source).unwrap();
+    let task = source.join("backlog/tasks/task-1 - Initial.md");
+    std::fs::create_dir_all(task.parent().unwrap()).unwrap();
+    std::fs::write(
+        task,
+        "---\nid: TASK-1\ntitle: Initial\nstatus: To Do\ncreated_date: '2025-01-01'\n---\nBody\n",
+    )
+    .unwrap();
+    run_git(&source, &["init", "-q", "-b", "main"], None);
+    run_git(&source, &["config", "user.email", "test@example.com"], None);
+    run_git(&source, &["config", "user.name", "Task Store Test"], None);
+    run_git(&source, &["add", "."], None);
+    run_git(&source, &["commit", "-qm", "initial"], None);
+    run_git(&source, &["switch", "-q", "-c", "feature"], None);
+    std::fs::write(
+        source.join("backlog/tasks/task-15 - Malformed remote task.md"),
+        "---\nid: [\n---\n",
+    )
+    .unwrap();
+    std::fs::write(
+        source.join("backlog/tasks/task-015 - Duplicate remote claim.md"),
+        "malformed duplicate filename claim",
+    )
+    .unwrap();
+    let archived = source.join("backlog/archive/tasks/task-17 - Archived remote task.md");
+    std::fs::create_dir_all(archived.parent().unwrap()).unwrap();
+    std::fs::write(archived, "malformed archived filename claim").unwrap();
+    run_git(&source, &["add", "."], None);
+    run_git(
+        &source,
+        &["commit", "-qm", "remote task"],
+        stale.then_some(("GIT_AUTHOR_DATE", "2000-01-01T00:00:00Z")),
+    );
+    run_git(
+        &source,
+        &["init", "--bare", "-q", origin.to_str().unwrap()],
+        None,
+    );
+    run_git(
+        &source,
+        &["remote", "add", "origin", origin.to_str().unwrap()],
+        None,
+    );
+    run_git(&source, &["push", "-q", "--all", "origin"], None);
+    run_git(
+        parent,
+        &[
+            "--git-dir",
+            origin.to_str().unwrap(),
+            "symbolic-ref",
+            "HEAD",
+            "refs/heads/main",
+        ],
+        None,
+    );
+
+    for clone in [typescript_root, rust_root] {
+        run_git(
+            parent,
+            &[
+                "clone",
+                "-q",
+                origin.to_str().unwrap(),
+                clone.to_str().unwrap(),
+            ],
+            None,
+        );
+    }
+    source
+}
+
 fn setup_branch_snapshot(root: &Path, stale: bool) {
     std::fs::create_dir_all(root).unwrap();
     let initial = root.join("backlog/tasks/task-1 - Initial.md");
