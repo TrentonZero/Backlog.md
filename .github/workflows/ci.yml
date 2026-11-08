@@ -254,3 +254,32 @@ jobs:
           BACKLOG_EXPECTED_NPM_CA="$NPM_CONFIG_CAFILE" \
             nix develop --command sh -c \
               'test "$GIT_SSL_CAINFO" = "$BACKLOG_EXPECTED_GIT_CA" && test "$NPM_CONFIG_CAFILE" = "$BACKLOG_EXPECTED_NPM_CA"'
+
+  rust:
+    name: rust-components (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - *secure-tls
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: 26.12.1
+      - name: Install checksum-verified Bun
+        run: node scripts/prepare-bun-runtime.cjs
+      - name: Install TypeScript reference dependencies
+        run: bun install --cafile "$SSL_CERT_FILE" --frozen-lockfile --linker=isolated
+        shell: bash
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
+        with:
+          toolchain: 1.98.0
+          components: rustfmt, clippy
+      - name: Check Rust formatting
+        run: cargo fmt --manifest-path rust/Cargo.toml --check
+      - name: Check Rust lint
+        run: cargo clippy --manifest-path rust/Cargo.toml --locked --all-targets -- -D warnings
+      - name: Run Rust tests
+        run: cargo test --manifest-path rust/Cargo.toml --locked
