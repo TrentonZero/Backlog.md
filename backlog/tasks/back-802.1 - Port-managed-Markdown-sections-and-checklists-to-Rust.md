@@ -1,11 +1,11 @@
 ---
 id: BACK-802.1
 title: Port managed Markdown sections and checklists to Rust
-status: In Progress
+status: Done
 assignee:
   - '@codex'
 created_date: '2026-11-07T23:12:00Z'
-updated_date: '2026-11-08T18:52:00Z'
+updated_date: '2026-11-08T18:58:00Z'
 labels: []
 dependencies:
   - BACK-801
@@ -37,17 +37,17 @@ The Rust migration needs the same managed Markdown body semantics as the shipped
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Rust extraction and updates match the supported marked and legacy task and decision section semantics, preserving unmanaged Markdown and fenced or nested marker-like text.
-- [ ] #2 Acceptance criteria and Definition of Done preserve stable indices, check state, indentation and supported validation/refusal behavior through reads and indexed edits.
-- [ ] #3 Comment parsing and updates retain bodies, authors and timestamps with the existing managed format and refuse invalid marker inputs.
-- [ ] #4 Focused Rust regression and current-TypeScript comparison cases cover the supported rules; Cargo tests, formatting and Clippy pass, with no executable cutover.
+- [x] #1 Rust extraction and updates match the supported marked and legacy task and decision section semantics, preserving unmanaged Markdown and fenced or nested marker-like text.
+- [x] #2 Acceptance criteria and Definition of Done preserve stable indices, check state, indentation and supported validation/refusal behavior through reads and indexed edits.
+- [x] #3 Comment parsing and updates retain bodies, authors and timestamps with the existing managed format and refuse invalid marker inputs.
+- [x] #4 Focused Rust regression and current-TypeScript comparison cases cover the supported rules; Cargo tests, formatting and Clippy pass, with no executable cutover.
 <!-- AC:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
 - [ ] #1 bun run check:types passes when TypeScript touched
 - [ ] #2 bun run check . passes when formatting/linting touched
-- [ ] #3 bun test (or scoped test) passes
+- [x] #3 bun test (or scoped test) passes
 <!-- DOD:END -->
 
 ## Implementation Plan
@@ -59,7 +59,11 @@ Execute docs/superpowers/plans/2026-11-07-rust-managed-sections.md with one focu
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Clarified context requirement before dependent implementation: preserve the reference family-specific treatment of markers/headings in code and containers. The original broad wording did not authorize changing operations whose current supported behavior differs. parse_criteria will match parseAllCriteria sequential indexing used by indexed application edits.
-
-Implemented the complete native managed-sections interface in rust/src/sections.rs with canonical task serialization, in-place decision migration, shared AC/DoD handling, comments and explicit validation APIs. Pinned markdown=1.0.0 for CommonMark heading spans; preserved reference-specific marker rules. Self-review complete. Verified 37 Cargo tests (including 5,166 live TypeScript comparisons), Cargo fmt and Clippy -D warnings; seven TypeScript reference suites pass 154 tests/929 assertions. No TypeScript/frontmatter implementation changes or executable cutover. Implementation report: .superpowers/sdd/2026-11-07-rust-managed-sections/task-1-report.md. Controller owns required separate reviews, acceptance checks, final summary, Done status and pushing.
+Clarified context requirement before dependent implementation: preserve reference family-specific marker/heading handling in code and containers; parse_criteria matches sequential parseAllCriteria indices. Implemented the full native sections API in rust/src/sections.rs with task/decision separation, AC/DoD, comments, safety and editor validation. Pinned markdown=1.0.0 for CommonMark spans. Verified 37 Cargo tests (including 5,166 TypeScript comparisons), seven reference suites (154 tests/929 assertions), fmt and Clippy. Cold simplicity and full-context complexity reviews approved with no blockers. Commits cb45bcb8 and a75a110f are pushed; no executable cutover.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Ported managed task/decision sections, AC/DoD lists, comments, and input/editor validation to the Rust library. Verified 37 Cargo tests, including 5,166 TypeScript comparisons; seven reference suites pass 154 tests/929 assertions; fmt and Clippy pass. Cold simplicity and full-context complexity reviews found no blockers. Commits cb45bcb8 and a75a110f are pushed to main. No executable cutover.
+<!-- SECTION:FINAL_SUMMARY:END -->
