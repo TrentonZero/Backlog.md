@@ -62,3 +62,31 @@ BACKLOG_REFERENCE_BUN=/path/to/bun cargo test --manifest-path rust/Cargo.toml
 ```
 
 Bun is only a test reference; the native library does not delegate operations.
+
+The [config module](src/config.rs) owns sparse stored configuration parsing,
+known-field serialization, and separate fresh-init and schema-migration defaults.
+It shares raw YAML semantics with frontmatter while keeping record compatibility
+preprocessing out of configuration. Config parsing and serialization operate on
+strings; persistence and physical record migrations remain later work.
+
+The [discovery module](src/discovery.rs) selects runtime cwd, root or folder
+configuration, and the nearest marked project. Selection is read-only. Root
+metadata recognition is independent of full config parsing; custom directories
+use the existing lexical path rule, including descendant symlinks. Ancestor
+markers work without Git; the installed Git executable is only an optional
+fallback. Discovery adds no CLI integration, caches, or watchers.
+
+The [discovery tests](tests/discovery.rs) cover precedence, invalid overrides,
+config markers, root-only paths and symlinks. Host separator rules are tested
+separately: Unix replaces backslashes after normalization, while Windows treats
+them as separators during normalization. Windows-specific fixtures run on native
+Windows CI; a Unix run does not establish Windows parity. Windows symlink tests
+skip only when fixture creation lacks permission.
+
+Run focused configuration and discovery checks with:
+
+```sh
+cargo test --manifest-path rust/Cargo.toml --test config
+cargo test --manifest-path rust/Cargo.toml --test discovery
+cargo test --manifest-path rust/Cargo.toml --lib
+```
