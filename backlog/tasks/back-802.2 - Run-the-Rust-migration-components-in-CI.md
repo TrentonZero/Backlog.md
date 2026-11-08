@@ -1,11 +1,11 @@
 ---
 id: BACK-802.2
 title: Run the Rust migration components in CI
-status: In Progress
+status: Done
 assignee:
   - '@codex'
 created_date: '2026-11-07T23:18:00Z'
-updated_date: '2026-11-08T18:55:00Z'
+updated_date: '2026-11-08T18:58:00Z'
 labels: []
 dependencies:
   - BACK-801
@@ -29,7 +29,7 @@ Verified Rust components now exist on main, but the current CI only exercises th
 <!-- AC:BEGIN -->
 - [x] #1 CI runs locked Cargo tests, rustfmt checking and Clippy with warnings denied on Linux, macOS and Windows using the declared Rust 1.98 toolchain.
 - [x] #2 The Rust job preserves the existing verified trust preparation and does not alter Bun test grouping or release behavior.
-- [ ] #3 The workflow parses, action/toolchain references are verified against primary sources, and the equivalent native commands pass locally before push; remote results are reported separately.
+- [x] #3 The workflow parses, action/toolchain references are verified against primary sources, and the equivalent native commands pass locally before push; remote results are reported separately.
 <!-- AC:END -->
 
 ## Definition of Done
@@ -48,5 +48,11 @@ Add a three-OS native matrix job after the existing jobs. Reuse secure-tls and c
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Verified Rust 1.98.0 exists and pinned dtolnay/rust-toolchain at observed commit 683b588c487a69d01f6c6ddf40f036ff682cc2c8. The three-OS job reuses existing Node 26.12.1/setup-node and checksum-verified Bun setup, then installs frozen dependencies for the Rust tests' live TypeScript reference. YAML parsing and diff check pass. Locally, cargo fmt --check, locked Clippy -D warnings, and locked Cargo tests pass; Cargo tests require the verified Bun 1.4.4 binary on PATH and then pass all 37 tests. Remote CI will be checked after push.
+Verified Rust 1.98.0 exists and pinned dtolnay/rust-toolchain at commit 683b588c487a69d01f6c6ddf40f036ff682cc2c8. Reuses existing Node 26.12.1/setup-node and checksum-verified Bun setup, then installs frozen dependencies for live TypeScript reference tests. YAML parsing and diff check pass; local fmt, locked Clippy and locked Cargo tests pass with Bun on PATH (37 tests). Push is on origin/main; GitHub lists CI active but currently returns zero workflow runs, so hosted results are unavailable.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Added three-OS locked Rust formatting, lint and test checks with existing verified TLS setup. Installed the checksum-verified Bun runtime and project dependencies because the Rust differential tests launch the TypeScript reference. YAML and local checks pass (37 Cargo tests). The push is on origin/main; GitHub reports the workflow active but the Actions API currently returns zero runs, so no hosted result is available yet.
+<!-- SECTION:FINAL_SUMMARY:END -->
