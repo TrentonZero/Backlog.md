@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@codex'
 created_date: '2026-11-07T21:53:00Z'
-updated_date: '2026-11-08T21:05:00Z'
+updated_date: '2026-11-08T21:18:00Z'
 labels: []
 dependencies:
   - BACK-801
@@ -66,4 +66,6 @@ Completed stages: BACK-802.1 managed sections, BACK-802.2 Rust CI, BACK-802.3 co
 Overall executable migration remains In Progress. Rust domain operations, Git integration, CLI behavior, browser server, MCP, TUI, and distribution/cutover gates remain outstanding.
 
 BACK-802.10 is complete and pushed. Rust now reads Git repository roots, branch names, and linked worktree paths through the installed Git executable, with optional-Git behavior preserved. Next migration work moves into Rust application operations: identity indexing and record lifecycle/query behavior before the canonical CLI and adapters.
+
+BACK-802.11 is complete and pushed. Rust now gathers filename-based task ID reservations from active and archived files in the current project and linked worktrees. Next: use the Rust model and index in local task CRUD and identity-safe mutation operations; the staged migration remains In Progress.
 <!-- SECTION:NOTES:END -->

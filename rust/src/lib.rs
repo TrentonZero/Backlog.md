@@ -8,3 +8,4 @@ pub mod records;
 pub mod sections;
 pub mod serialization;
 pub mod storage;
+pub mod task_file_ids;
