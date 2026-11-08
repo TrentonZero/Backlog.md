@@ -1,9 +1,160 @@
 //! Stored-config contracts: src/file-system/operations.ts:118-255, 2315-2581.
-use backlog_md::config::{Config, ConfigLocation, parse_config, serialize_config};
+use backlog_md::config::{
+    Config, ConfigLocation, initial_config, migrate_config, needs_schema_migration, parse_config,
+    serialize_config,
+};
 use std::path::Path;
 
 fn parse(source: &str) -> Config {
     parse_config(source, Path::new("project/backlog/config.yml")).unwrap()
+}
+
+// Fresh-init contracts: src/core/init.ts:119-165 and src/constants/index.ts:77-88.
+#[test]
+fn fresh_initialization_applies_its_own_defaults() {
+    assert_eq!(
+        initial_config("P", None, false).unwrap(),
+        Config {
+            project_name: "P".into(),
+            default_status: Some("To Do".into()),
+            max_column_width: Some(20.0),
+            default_port: Some(6420.0),
+            auto_open_browser: Some(true),
+            remote_operations: Some(true),
+            check_active_branches: Some(true),
+            auto_commit: Some(false),
+            bypass_git_hooks: Some(false),
+            filesystem_only: Some(false),
+            active_branch_days: Some(30.0),
+            task_prefix: Some("task".into()),
+            ..Config::default()
+        }
+    );
+}
+
+// Prefix validation judges the exact persisted input: src/utils/prefix-config.ts:26-53.
+#[test]
+fn fresh_initialization_defaults_empty_prefix_and_validates_explicit_prefix() {
+    for prefix in [None, Some("")] {
+        assert_eq!(
+            initial_config("P", prefix, false).unwrap().task_prefix,
+            Some("task".into())
+        );
+    }
+    for prefix in ["BACK", "issue", "MiXeD"] {
+        assert_eq!(
+            initial_config("P", Some(prefix), false)
+                .unwrap()
+                .task_prefix,
+            Some(prefix.into())
+        );
+    }
+    for prefix in [" ", " BACK", "BACK ", "back-log", "BACK1", "é"] {
+        assert!(
+            initial_config("P", Some(prefix), false).is_err(),
+            "{prefix}"
+        );
+    }
+    for prefix in ["draft", "DRAFT", "Doc", "DECision"] {
+        assert!(
+            initial_config("P", Some(prefix), false).is_err(),
+            "{prefix}"
+        );
+    }
+}
+
+#[test]
+fn filesystem_only_initialization_disables_git_flags() {
+    let config = initial_config("P", Some("BACK"), true).unwrap();
+    assert_eq!(config.filesystem_only, Some(true));
+    assert_eq!(config.check_active_branches, Some(false));
+    assert_eq!(config.remote_operations, Some(false));
+    assert_eq!(config.auto_commit, Some(false));
+    assert_eq!(config.bypass_git_hooks, Some(false));
+    assert_eq!(config.auto_open_browser, Some(true));
+    assert_eq!(config.task_prefix.as_deref(), Some("BACK"));
+}
+
+// Pure schema defaults: src/core/config-migration.ts:6-35.
+#[test]
+fn absent_config_migration_uses_schema_defaults() {
+    assert_eq!(
+        migrate_config(None),
+        Config {
+            project_name: "Untitled Project".into(),
+            date_format: "YYYY-MM-DD".into(),
+            default_editor: Some(String::new()),
+            default_status: Some(String::new()),
+            max_column_width: Some(80.0),
+            default_port: Some(6420.0),
+            auto_open_browser: Some(true),
+            remote_operations: Some(true),
+            auto_commit: Some(false),
+            bypass_git_hooks: Some(false),
+            check_active_branches: Some(true),
+            active_branch_days: Some(30.0),
+            ..Config::default()
+        }
+    );
+}
+
+#[test]
+fn sparse_config_migration_fills_missing_options_and_keeps_stored_values() {
+    let existing =
+        parse("project_name: P\nstatuses: [Review, Done]\nlabels: [bug]\ndate_format: custom\n");
+    assert_eq!(
+        migrate_config(Some(existing)),
+        Config {
+            project_name: "P".into(),
+            statuses: vec!["Review".into(), "Done".into()],
+            labels: vec!["bug".into()],
+            date_format: "custom".into(),
+            default_editor: Some(String::new()),
+            default_status: Some(String::new()),
+            max_column_width: Some(80.0),
+            default_port: Some(6420.0),
+            auto_open_browser: Some(true),
+            remote_operations: Some(true),
+            auto_commit: Some(false),
+            bypass_git_hooks: Some(false),
+            check_active_branches: Some(true),
+            active_branch_days: Some(30.0),
+            ..Config::default()
+        }
+    );
+    let migrated = migrate_config(Some(parse("")));
+    assert_eq!(migrated.project_name, "");
+    assert_eq!(migrated.date_format, "yyyy-mm-dd");
+}
+
+#[test]
+fn schema_migration_preserves_explicit_false_empty_and_numeric_values() {
+    let existing = parse(
+        "project_name: ''\nstatuses: []\nlabels: []\ndefault_editor: ''\ndefault_status: ''\ndefault_assignee: []\ntypes: []\npriorities: []\nprojects: []\ndefinition_of_done: []\nmax_column_width: 0\ndefault_port: 0\nactive_branch_days: 0\nauto_open_browser: false\nremote_operations: false\ncheck_active_branches: false\nauto_commit: true\nbypass_git_hooks: true\nfilesystem_only: true\nzero_padded_ids: 0\ntask_prefix: ''\nonStatusChange: ''\n",
+    );
+    assert_eq!(migrate_config(Some(existing.clone())), existing);
+}
+
+// Only these four optional values gate schema migration: src/core/config-migration.ts:43-58.
+#[test]
+fn schema_migration_checks_missing_required_options_without_truthiness() {
+    assert!(needs_schema_migration(&parse("")));
+    let complete = parse(
+        "project_name: ''\nstatuses: []\ndefault_port: 0\nauto_open_browser: false\nremote_operations: false\nauto_commit: false\n",
+    );
+    assert!(!needs_schema_migration(&complete));
+    for missing in ["port", "browser", "remote", "commit"] {
+        let mut config = complete.clone();
+        match missing {
+            "port" => config.default_port = None,
+            "browser" => config.auto_open_browser = None,
+            "remote" => config.remote_operations = None,
+            "commit" => config.auto_commit = None,
+            _ => unreachable!(),
+        }
+        assert!(needs_schema_migration(&config), "{missing}");
+    }
+    assert!(!needs_schema_migration(&migrate_config(None)));
 }
 
 #[test]

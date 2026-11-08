@@ -67,6 +67,74 @@ impl Default for Config {
     }
 }
 
+/// Build fresh-project defaults without applying them to stored configuration.
+pub fn initial_config(
+    project_name: &str,
+    task_prefix: Option<&str>,
+    filesystem_only: bool,
+) -> Result<Config, String> {
+    let task_prefix = task_prefix
+        .filter(|prefix| !prefix.is_empty())
+        .unwrap_or("task");
+    if !task_prefix
+        .bytes()
+        .all(|character| character.is_ascii_alphabetic())
+    {
+        return Err("Task prefix must contain only letters (a-z, A-Z).".into());
+    }
+    if ["draft", "doc", "decision"]
+        .iter()
+        .any(|reserved| task_prefix.eq_ignore_ascii_case(reserved))
+    {
+        return Err(format!(
+            "Task prefix \"{task_prefix}\" is reserved for drafts, docs, or decisions. Choose a different prefix."
+        ));
+    }
+    Ok(Config {
+        project_name: project_name.into(),
+        default_status: Some("To Do".into()),
+        max_column_width: Some(20.0),
+        default_port: Some(6420.0),
+        auto_open_browser: Some(true),
+        remote_operations: Some(!filesystem_only),
+        check_active_branches: Some(!filesystem_only),
+        auto_commit: Some(false),
+        bypass_git_hooks: Some(false),
+        filesystem_only: Some(filesystem_only),
+        active_branch_days: Some(30.0),
+        task_prefix: Some(task_prefix.into()),
+        ..Config::default()
+    })
+}
+
+/// Match the stored schema's presence checks; explicit false and zero are present.
+pub fn needs_schema_migration(config: &Config) -> bool {
+    config.default_port.is_none()
+        || config.auto_open_browser.is_none()
+        || config.remote_operations.is_none()
+        || config.auto_commit.is_none()
+}
+
+/// Fill only absent schema options, preserving stored values independently of init defaults.
+pub fn migrate_config(config: Option<Config>) -> Config {
+    let mut config = config.unwrap_or_else(|| Config {
+        project_name: "Untitled Project".into(),
+        date_format: "YYYY-MM-DD".into(),
+        ..Config::default()
+    });
+    config.default_editor.get_or_insert_with(String::new);
+    config.default_status.get_or_insert_with(String::new);
+    config.max_column_width.get_or_insert(80.0);
+    config.default_port.get_or_insert(6420.0);
+    config.auto_open_browser.get_or_insert(true);
+    config.remote_operations.get_or_insert(true);
+    config.auto_commit.get_or_insert(false);
+    config.bypass_git_hooks.get_or_insert(false);
+    config.check_active_branches.get_or_insert(true);
+    config.active_branch_days.get_or_insert(30.0);
+    config
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ConfigLocation {
     Folder,
