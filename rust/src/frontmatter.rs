@@ -80,6 +80,19 @@ fn preprocess(yaml: &str) -> String {
             let prefix = &line[..key.len() + 1];
             let value = raw.trim();
             let quote = |text: &str| Value::String(text.to_owned()).to_string();
+            if key.trim() == "ordinal" {
+                let normalized = match value.to_ascii_lowercase().as_str() {
+                    ".nan" | ".inf" | "+.inf" | "-.inf" => {
+                        match value.to_ascii_lowercase().as_str() {
+                            ".nan" => "NaN",
+                            "-.inf" => "-Infinity",
+                            _ => "Infinity",
+                        }
+                    }
+                    _ => return line.to_owned(),
+                };
+                return format!("{prefix} {}", quote(normalized));
+            }
             if ["due_date", "\"due_date\"", "'due_date'"].contains(&key.trim()) {
                 let comment = raw
                     .as_bytes()
@@ -297,6 +310,36 @@ pub fn update_frontmatter(
         ),
         None => format!("---\n{edited}---\n{source}"),
     })
+}
+
+pub(crate) fn update_frontmatter_scalar(
+    source: &str,
+    key: &str,
+    scalar: &str,
+) -> Result<String, FrontmatterError> {
+    let header = split_header(source)?.ok_or(FrontmatterError::ExpectedMapping)?;
+    let syntax = YamlFile::from_str(header.yaml)
+        .map_err(|error| FrontmatterError::InvalidYaml(error.to_string()))?;
+    let document = syntax
+        .documents()
+        .next()
+        .ok_or(FrontmatterError::ExpectedMapping)?;
+    let mapping = document
+        .as_mapping()
+        .ok_or(FrontmatterError::ExpectedMapping)?;
+    let replacement = YamlFile::from_str(&format!("value: {scalar}\n"))
+        .map_err(|error| FrontmatterError::InvalidYaml(error.to_string()))?;
+    let value = replacement
+        .documents()
+        .next()
+        .and_then(|document| document.get("value"))
+        .ok_or(FrontmatterError::ExpectedMapping)?;
+    mapping.set(key, value);
+    let edited = syntax.to_string();
+    Ok(format!(
+        "{}{}{}{}",
+        header.opening, edited, header.closing, header.body
+    ))
 }
 
 #[cfg(test)]

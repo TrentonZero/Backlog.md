@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@codex'
 created_date: '2026-11-07T21:53:00Z'
-updated_date: '2026-11-08T19:37:00Z'
+updated_date: '2026-11-08T20:26:00Z'
 labels: []
 dependencies:
   - BACK-801
@@ -16,12 +16,14 @@ references:
   - BACK-802.3
   - BACK-802.4
   - BACK-802.5
+  - BACK-802.6
 modified_files:
   - >-
     backlog/tasks/back-802.3 -
     Port-native-configuration-parsing-and-defaults-to-Rust.md
   - backlog/tasks/back-802.4 - Port-project-directory-discovery-to-Rust.md
   - backlog/tasks/back-802.5 - Port-typed-Markdown-record-parsers-to-Rust.md
+  - backlog/tasks/back-802.6 - Port-Markdown-record-serialization-to-Rust.md
 type: feature
 ordinal: 408000
 ---
@@ -60,4 +62,8 @@ Continue the eight stages in docs/superpowers/specs/2026-11-07-rust-migration-de
 
 <!-- SECTION:NOTES:BEGIN -->
 Completed stages: BACK-802.1 managed sections, BACK-802.2 Rust CI, BACK-802.3 config parsing/defaults, and BACK-802.4 native discovery. The Rust library now has reviewed frontmatter, managed-body, config/default and discovery components. Overall executable migration remains In Progress. Next: typed record parsing/serialization, durable storage and Bun-compatible locks before CLI cutover. GitHub reports zero Actions runs; Windows execution is therefore unchecked.
+
+BACK-802.5 is complete and pushed. Native typed parsers now cover all four Markdown record families. BACK-802.6 is active for task, decision and document serialization.
+
+BACK-802.6 is complete and pushed. Pure Rust serializers now cover task, decision, and document records. Next: continue storage, locking, and CLI cutover stages in the approved migration plan.
 <!-- SECTION:NOTES:END -->

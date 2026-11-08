@@ -616,13 +616,23 @@ fn update_decision_sections(
     content: &str,
     changes: &BTreeMap<SectionKey, Option<String>>,
 ) -> Result<String, SectionError> {
-    let ranges = decision_ranges(content);
-    unique_decisions(&ranges)?;
     let newline = if content.contains("\r\n") {
         "\r\n"
     } else {
         "\n"
     };
+    update_decision_sections_with_newline(content, changes, newline)
+}
+
+/// Update decision sections using the source record's line ending, which may
+/// come from its frontmatter header when its body is empty.
+pub(crate) fn update_decision_sections_with_newline(
+    content: &str,
+    changes: &BTreeMap<SectionKey, Option<String>>,
+    newline: &str,
+) -> Result<String, SectionError> {
+    let ranges = decision_ranges(content);
+    unique_decisions(&ranges)?;
     let mut edits = Vec::new();
     let mut appended = String::new();
     for key in DECISION_KEYS {

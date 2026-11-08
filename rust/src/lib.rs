@@ -4,3 +4,4 @@ pub mod discovery;
 pub mod frontmatter;
 pub mod records;
 pub mod sections;
+pub mod serialization;
