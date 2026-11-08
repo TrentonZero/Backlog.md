@@ -1,4 +1,5 @@
 use backlog_md::{
+    config::Config,
     records::{parse_markdown, parse_task},
     storage::Storage,
     task_store::{TaskStore, TaskStoreError},
@@ -103,7 +104,9 @@ fn create_and_update_match_live_typescript_files() {
 
     let expected = reference(&typescript_root);
     let store = TaskStore::new(&rust_root, "backlog", "task");
-    let created = store.create_task(initial_task(), None).unwrap();
+    let created = store
+        .create_task(initial_task(), &Config::default())
+        .unwrap();
     assert_eq!(created.task.id, expected["id"]);
     assert_eq!(
         created.path.to_string_lossy(),
@@ -250,14 +253,16 @@ process.stdout.write(JSON.stringify(results));
 fn concurrent_creates_allocate_distinct_task_ids() {
     let fixture = Fixture::new();
     let store = TaskStore::new(&fixture.0, "backlog", "task");
+    let config = Config::default();
     let barrier = Arc::new(Barrier::new(3));
     let handles: Vec<_> = (0..2)
         .map(|_| {
             let store = store.clone();
             let barrier = Arc::clone(&barrier);
+            let config = config.clone();
             thread::spawn(move || {
                 barrier.wait();
-                store.create_task(initial_task(), None).unwrap().task.id
+                store.create_task(initial_task(), &config).unwrap().task.id
             })
         })
         .collect();
@@ -282,9 +287,97 @@ fn task_creation_reserves_uncommitted_linked_worktree_filenames() {
 
     let expected = reference(&typescript_root);
     let store = TaskStore::new(&rust_root, "backlog", "task");
-    let created = store.create_task(initial_task(), None).unwrap();
+    let created = store
+        .create_task(initial_task(), &Config::default())
+        .unwrap();
     assert_eq!(created.task.id, expected["id"]);
     assert_eq!(created.task.id, "TASK-12");
+}
+
+#[test]
+fn branch_snapshot_ids_match_live_typescript_settings() {
+    let fixture = Fixture::new();
+    for (index, enabled, stale, expected_id) in [
+        (0, true, false, "TASK-16"),
+        (1, false, false, "TASK-2"),
+        (2, true, true, "TASK-2"),
+    ] {
+        let typescript_root = fixture.0.join(format!("typescript-{index}"));
+        let rust_root = fixture.0.join(format!("rust-{index}"));
+        setup_branch_snapshot(&typescript_root, stale);
+        setup_branch_snapshot(&rust_root, stale);
+        if !enabled {
+            let config_path = typescript_root.join("backlog/config.yml");
+            std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+            std::fs::write(&config_path, "check_active_branches: false\n").unwrap();
+        }
+
+        let expected = reference(&typescript_root);
+        let store = TaskStore::new(&rust_root, "backlog", "task");
+        let config = Config {
+            check_active_branches: Some(enabled),
+            active_branch_days: Some(30.0),
+            ..Config::default()
+        };
+        let created = store.create_task(initial_task(), &config).unwrap();
+        assert_eq!(expected["id"], expected_id);
+        assert_eq!(created.task.id, expected_id);
+    }
+}
+
+fn setup_branch_snapshot(root: &Path, stale: bool) {
+    std::fs::create_dir_all(root).unwrap();
+    let initial = root.join("backlog/tasks/task-1 - Initial.md");
+    std::fs::create_dir_all(initial.parent().unwrap()).unwrap();
+    std::fs::write(
+        initial,
+        "---\nid: TASK-1\ntitle: Initial\nstatus: To Do\ncreated_date: '2025-01-01'\n---\nBody\n",
+    )
+    .unwrap();
+    run_git(root, &["init", "-q"], None);
+    run_git(root, &["config", "user.email", "test@example.com"], None);
+    run_git(root, &["config", "user.name", "Task Store Test"], None);
+    run_git(root, &["add", "."], None);
+    run_git(root, &["commit", "-qm", "initial"], None);
+    let current_branch = Command::new("git")
+        .args(["branch", "--show-current"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(current_branch.status.success());
+    let current_branch = String::from_utf8_lossy(&current_branch.stdout)
+        .trim()
+        .to_owned();
+    run_git(root, &["switch", "-q", "-c", "feature"], None);
+    let branch_task = root.join("backlog/tasks/task-15 - Malformed branch task.md");
+    std::fs::write(branch_task, "---\nid: [\n---\n").unwrap();
+    let duplicate_task = root.join("backlog/tasks/task-015 - Duplicate branch claim.md");
+    std::fs::write(duplicate_task, "malformed duplicate filename claim").unwrap();
+    run_git(root, &["add", "."], None);
+    let old_date = "2000-01-01T00:00:00Z";
+    run_git(
+        root,
+        &["commit", "-qm", "branch task"],
+        stale.then_some(("GIT_AUTHOR_DATE", old_date)),
+    );
+    run_git(root, &["switch", "-q", &current_branch], None);
+}
+
+fn run_git(root: &Path, arguments: &[&str], date: Option<(&str, &str)>) {
+    let mut command = Command::new("git");
+    command.args(arguments).current_dir(root);
+    if let Some((name, value)) = date {
+        command.env(name, value);
+        if name == "GIT_AUTHOR_DATE" {
+            command.env("GIT_COMMITTER_DATE", value);
+        }
+    }
+    let output = command.output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 fn setup_linked_worktree(root: &Path, sibling: &Path) {

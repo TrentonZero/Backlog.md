@@ -1,6 +1,7 @@
 //! Local task record reads with active/archive identity semantics.
 
 use crate::{
+    config::Config,
     git::GitRepository,
     identity::{
         canonical_task_id, extract_id_from_filename, generate_next_id, generate_next_subtask_id,
@@ -120,7 +121,7 @@ impl TaskStore {
     pub fn create_task(
         &self,
         mut task: TaskRecord,
-        zero_padding: Option<usize>,
+        config: &Config,
     ) -> Result<TaskFileEntry, TaskStoreError> {
         let lock = self
             .storage
@@ -147,7 +148,12 @@ impl TaskStore {
             .map(|record| record.id)
             .collect();
         existing_ids.extend(filename_ids);
+        existing_ids.extend(self.branch_task_file_ids(config));
         let id_refs: Vec<&str> = existing_ids.iter().map(String::as_str).collect();
+        let zero_padding = config
+            .zero_padded_ids
+            .filter(|width| width.is_finite() && *width > 0.0)
+            .map(|width| width as usize);
         task.id = if let Some(parent_id) = task.parent_task_id.as_deref() {
             generate_next_subtask_id(&id_refs, parent_id, &self.task_prefix, zero_padding)
         } else {
@@ -252,6 +258,47 @@ impl TaskStore {
             id.to_lowercase(),
             sanitize_filename(title)
         ))
+    }
+
+    fn branch_task_file_ids(&self, config: &Config) -> Vec<String> {
+        if config.check_active_branches == Some(false) || config.filesystem_only == Some(true) {
+            return Vec::new();
+        }
+        let backlog_directory = self
+            .backlog_relative_directory
+            .to_string_lossy()
+            .replace('\\', "/");
+        let backlog_directory = backlog_directory.trim_matches('/').trim_start_matches("./");
+        if backlog_directory.is_empty() {
+            return Vec::new();
+        }
+
+        let git = GitRepository::new(&self.project_root);
+        let current_branch = git.current_branch();
+        let mut ids = Vec::new();
+        for tip in git.recent_local_branch_tips(config.active_branch_days.unwrap_or(30.0)) {
+            if tip.current || tip.name == current_branch {
+                continue;
+            }
+            for path in git.files_in_tree(&tip.commit, backlog_directory) {
+                let relative = path
+                    .strip_prefix(&format!("{backlog_directory}/"))
+                    .unwrap_or(&path);
+                let is_task_record = ["tasks/", "archive/tasks/", "completed/"]
+                    .iter()
+                    .any(|directory| relative.starts_with(directory));
+                if !is_task_record {
+                    continue;
+                }
+                let Some(filename) = relative.rsplit('/').next() else {
+                    continue;
+                };
+                if let Some(id) = extract_id_from_filename(filename, &self.task_prefix) {
+                    ids.push(id);
+                }
+            }
+        }
+        ids
     }
 
     pub fn list_tasks(&self) -> Vec<TaskFileEntry> {

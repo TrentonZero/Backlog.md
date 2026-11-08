@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@codex'
 created_date: '2026-11-07T21:53:00Z'
-updated_date: '2026-11-08T21:52:00Z'
+updated_date: '2026-11-08T23:47:00Z'
 labels: []
 dependencies:
   - BACK-801
@@ -24,6 +24,9 @@ modified_files:
   - >-
     backlog/tasks/back-802.13 -
     Port-identity-safe-task-creation-and-updates-to-Rust.md
+  - >-
+    backlog/tasks/back-802.14 -
+    Port-branch-snapshot-task-ID-reservation-to-Rust.md
   - rust/src/git.rs
   - rust/src/task_store.rs
   - rust/tests/task_store.rs
@@ -66,15 +69,5 @@ Continue the eight stages in docs/superpowers/specs/2026-11-07-rust-migration-de
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Completed stages: BACK-802.1 managed sections, BACK-802.2 Rust CI, BACK-802.3 config parsing/defaults, BACK-802.4 native discovery, BACK-802.5 typed record parsing, BACK-802.6 record serialization, BACK-802.7 storage and compatible locks, BACK-802.8 task ID normalization/allocation, BACK-802.9 shared entity identity and ambiguity resolution. Windows execution remains unchecked; GitHub reports zero Actions runs.
-
-Overall executable migration remains In Progress. Rust domain operations, Git integration, CLI behavior, browser server, MCP, TUI, and distribution/cutover gates remain outstanding.
-
-BACK-802.10 is complete and pushed. Rust now reads Git repository roots, branch names, and linked worktree paths through the installed Git executable, with optional-Git behavior preserved. Next migration work moves into Rust application operations: identity indexing and record lifecycle/query behavior before the canonical CLI and adapters.
-
-BACK-802.11 is complete and pushed. Rust now gathers filename-based task ID reservations from active and archived files in the current project and linked worktrees. Next: use the Rust model and index in local task CRUD and identity-safe mutation operations; the staged migration remains In Progress.
-
-BACK-802.12 is complete and pushed. Rust now lists local active and archived task records and performs identity-safe active lookup with live TypeScript parity, including malformed and invalid dependency behavior. Next migration work continues into task mutations and canonical CLI operations; the overall migration remains In Progress.
-
-BACK-802.13 is complete and verified. Rust TaskStore now creates and updates active task records with shared locks, current/linked-worktree allocation, and source-preserving writes. BACK-802.14 tracks the remaining configured branch snapshot task-ID reservations; remote-ref allocation and the rest of the operation layer are still outstanding.
+Completed stages: BACK-802.1 managed sections, BACK-802.2 Rust CI, BACK-802.3 config parsing/defaults, BACK-802.4 native discovery, BACK-802.5 typed record parsing, BACK-802.6 record serialization, BACK-802.7 storage and compatible locks, BACK-802.8 task ID normalization/allocation, BACK-802.9 shared entity identity and ambiguity resolution, BACK-802.10 Git repository/worktree discovery, BACK-802.11 filename ID reservation across worktrees, BACK-802.12 local task listing/lookup, BACK-802.13 local task create/update, BACK-802.14 local branch snapshot reservation. Windows execution remains unchecked; GitHub reports zero Actions runs.\n\nOverall executable migration remains In Progress. Remote-ref reservations, broader Rust domain operations, CLI behavior, browser server, MCP, TUI, and distribution/cutover gates remain outstanding.\n\nBACK-802.10 added Git repository roots, branch names, and linked worktree discovery. BACK-802.11 added active/archive task filename ID reservations across the current project and linked worktrees. BACK-802.12 added local task listing and identity-safe lookup with TypeScript parity. BACK-802.13 added locked local task creation and updates with source-preserving writes. BACK-802.14 added allocation from configured recent local branch snapshots under the create lock, with settings, current-branch exclusion, and age cutoff matching TypeScript. Checks and required reviews passed; remote-ref reservation remains a follow-up.
 <!-- SECTION:NOTES:END -->

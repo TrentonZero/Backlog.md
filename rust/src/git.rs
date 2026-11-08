@@ -2,6 +2,15 @@
 
 use std::path::PathBuf;
 use std::process::{Command, Output};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GitBranchTip {
+    pub name: String,
+    pub commit: String,
+    pub current: bool,
+    pub committed_at: i64,
+}
 
 #[derive(Clone, Debug)]
 pub struct GitRepository {
@@ -54,6 +63,63 @@ impl GitRepository {
         } else {
             self.project_root.join(path)
         })
+    }
+
+    /// List current and recent local branches in a stable order.
+    pub fn recent_local_branch_tips(&self, active_branch_days: f64) -> Vec<GitBranchTip> {
+        let Some(output) = self.run(&[
+            "for-each-ref",
+            "--format=%(HEAD)%00%(refname:short)%00%(objectname)%00%(committerdate:unix)",
+            "refs/heads",
+        ]) else {
+            return Vec::new();
+        };
+        if !output.status.success() {
+            return Vec::new();
+        }
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs_f64();
+        let cutoff = now - active_branch_days * 86_400.0;
+        let mut tips: Vec<_> = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|line| {
+                let mut fields = line.split('\0');
+                let head = fields.next()?;
+                let name = fields.next()?.trim();
+                let commit = fields.next()?.trim();
+                let committed_at = fields.next()?.trim().parse::<i64>().ok()?;
+                let current = head.trim() == "*";
+                (!name.is_empty()
+                    && !commit.is_empty()
+                    && (current || committed_at as f64 >= cutoff))
+                    .then(|| GitBranchTip {
+                        name: name.to_owned(),
+                        commit: commit.to_owned(),
+                        current,
+                        committed_at,
+                    })
+            })
+            .collect();
+        tips.sort_by(|left, right| left.name.cmp(&right.name));
+        tips
+    }
+
+    /// List paths in a committed tree beneath the given project-relative directory.
+    pub fn files_in_tree(&self, reference: &str, path: &str) -> Vec<String> {
+        let Some(output) = self.run(&["ls-tree", "-r", "--name-only", "-z", reference, "--", path])
+        else {
+            return Vec::new();
+        };
+        if !output.status.success() {
+            return Vec::new();
+        }
+        String::from_utf8_lossy(&output.stdout)
+            .split('\0')
+            .filter(|path| !path.is_empty())
+            .map(str::to_owned)
+            .collect()
     }
 
     pub fn current_branch(&self) -> String {
