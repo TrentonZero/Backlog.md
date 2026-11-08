@@ -175,6 +175,18 @@ fn unix_backslashes_are_replaced_only_after_host_normalization() {
         Some("a/../data")
     );
     assert_eq!(normalize_backlog_directory("..\\outside"), None);
+
+    let fixture = Fixture::new();
+    let target = fixture.dir("data");
+    fixture.file(
+        "backlog.config.yml",
+        "project_name: Root\nbacklog_directory: a\\..\\data\n",
+    );
+    let resolution = resolve_backlog_directory(&fixture.0);
+    assert_eq!(resolution.backlog_directory.as_deref(), Some("data"));
+    assert_eq!(resolution.backlog_path, Some(target));
+    assert!(resolution.backlog_path.unwrap().is_dir());
+    assert!(!fixture.0.join("a").exists());
 }
 #[cfg(windows)]
 #[test]

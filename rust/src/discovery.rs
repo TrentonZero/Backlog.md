@@ -214,7 +214,9 @@ pub fn resolve_backlog_directory(project_root: &Path) -> BacklogDirectoryResolut
     let metadata = root_config_metadata(&root_config_path);
     let selected = metadata
         .as_ref()
-        .and_then(|metadata| metadata.backlog_directory.clone())
+        .and_then(|metadata| metadata.backlog_directory.as_deref())
+        // Root selection normalizes metadata again, as the existing root-config flow does.
+        .and_then(normalize_backlog_directory)
         .map(|directory| {
             let source = match directory.as_str() {
                 "backlog" => BacklogDirectorySource::Backlog,
@@ -237,7 +239,7 @@ pub fn resolve_backlog_directory(project_root: &Path) -> BacklogDirectoryResolut
         root_config_exists,
     };
     if let Some((directory, source)) = selected {
-        let backlog_path = project_root.join(&directory);
+        let backlog_path = lexical_path(&project_root.join(&directory));
         if metadata.is_some() {
             result.config_path = Some(result.root_config_path.clone());
             result.config_location = Some(ConfigLocation::Root);
