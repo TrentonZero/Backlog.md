@@ -1,5 +1,175 @@
 //! Pure task-ID normalization, comparison, filename extraction, and allocation rules.
 
+use std::fmt;
+
+/// A deterministic error raised when several files claim the same entity ID.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AmbiguousIdError {
+    pub id: String,
+    pub candidates: Vec<String>,
+    message: String,
+}
+
+impl AmbiguousIdError {
+    fn new(entity_label: &str, id: &str, mut candidates: Vec<String>) -> Self {
+        candidates.sort();
+        let message = format!(
+            "{} ID {} is ambiguous; {} files match:\n{}\nRun 'backlog doctor' to review the conflicting files.",
+            entity_label,
+            id,
+            candidates.len(),
+            candidates
+                .iter()
+                .map(|path| format!("  - {path}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        Self {
+            id: id.to_owned(),
+            candidates,
+            message,
+        }
+    }
+}
+
+impl fmt::Display for AmbiguousIdError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for AmbiguousIdError {}
+
+/// Canonical entity key, or `None` when the ID has no addressable body.
+pub fn entity_id_key(prefix: &str, id: &str) -> Option<String> {
+    let body = entity_id_body(prefix, id).trim();
+    if body.is_empty() {
+        return None;
+    }
+    let key_body = if body.bytes().all(|byte| byte.is_ascii_digit()) {
+        let stripped = body.trim_start_matches('0');
+        if stripped.is_empty() { "0" } else { stripped }
+    } else {
+        return Some(format!("{}-{}", prefix, body.to_lowercase()));
+    };
+    Some(format!("{prefix}-{key_body}"))
+}
+
+/// Normalize an entity ID while preserving its body spelling and whitespace.
+pub fn normalize_entity_id(prefix: &str, id: &str) -> String {
+    format!("{prefix}-{}", entity_id_body(prefix, id))
+}
+
+/// Compare entity IDs, with empty IDs never matching.
+pub fn entity_ids_equal(prefix: &str, left: &str, right: &str) -> bool {
+    match entity_id_key(prefix, left) {
+        Some(left_key) => Some(left_key) == entity_id_key(prefix, right),
+        None => false,
+    }
+}
+
+fn entity_id_body<'a>(prefix: &str, value: &'a str) -> &'a str {
+    let trimmed = value.trim();
+    match trimmed.split_once('-') {
+        Some((candidate, body)) if candidate.eq_ignore_ascii_case(prefix) => body,
+        _ => trimmed,
+    }
+}
+
+/// Find a unique item matching an entity ID, or return a sorted ambiguity error.
+pub fn find_unique_entity_by_id<'a, T, F>(
+    entity_label: &str,
+    prefix: &str,
+    id: &str,
+    items: &'a [T],
+    describe: F,
+) -> Result<Option<&'a T>, AmbiguousIdError>
+where
+    T: HasEntityId,
+    F: Fn(&T) -> String,
+{
+    let matches: Vec<&T> = items
+        .iter()
+        .filter(|item| entity_ids_equal(prefix, id, item.entity_id()))
+        .collect();
+    if matches.len() > 1 {
+        return Err(AmbiguousIdError::new(
+            entity_label,
+            &normalize_entity_id(prefix, id),
+            matches.iter().map(|item| describe(item)).collect(),
+        ));
+    }
+    Ok(matches.first().copied())
+}
+
+/// Supplies the ID field used by shared entity lookup.
+pub trait HasEntityId {
+    fn entity_id(&self) -> &str;
+}
+
+pub fn document_id_key(id: &str) -> Option<String> {
+    entity_id_key("doc", id)
+}
+pub fn normalize_document_id(id: &str) -> String {
+    normalize_entity_id("doc", id)
+}
+pub fn decision_id_key(id: &str) -> Option<String> {
+    entity_id_key("decision", id)
+}
+pub fn decision_ids_equal(left: &str, right: &str) -> bool {
+    entity_ids_equal("decision", left, right)
+}
+
+pub fn find_document_by_id<'a, T, F>(
+    items: &'a [T],
+    id: &str,
+    describe: F,
+) -> Result<Option<&'a T>, AmbiguousIdError>
+where
+    T: HasEntityId,
+    F: Fn(&T) -> String,
+{
+    find_unique_entity_by_id("Document", "doc", id, items, describe)
+}
+
+pub fn find_decision_by_id<'a, T, F>(
+    items: &'a [T],
+    id: &str,
+    describe: F,
+) -> Result<Option<&'a T>, AmbiguousIdError>
+where
+    T: HasEntityId,
+    F: Fn(&T) -> String,
+{
+    find_unique_entity_by_id("Decision", "decision", id, items, describe)
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TaskIdResolution {
+    Found(usize),
+    Ambiguous(Vec<usize>),
+    Invalid,
+    NotFound,
+}
+
+/// Resolve a task ID against an ordered list; returned indices preserve source ordering.
+pub fn resolve_task_by_id(input_id: &str, task_ids: &[String]) -> TaskIdResolution {
+    let input = input_id.trim();
+    if !is_valid_task_id(input) {
+        return TaskIdResolution::Invalid;
+    }
+    let matches: Vec<usize> = task_ids
+        .iter()
+        .enumerate()
+        .filter_map(|(index, id)| task_ids_equal(input, id, "task").then_some(index))
+        .collect();
+    match matches.as_slice() {
+        [] => TaskIdResolution::NotFound,
+        [index] => TaskIdResolution::Found(*index),
+        _ => TaskIdResolution::Ambiguous(matches),
+    }
+}
+
 /// Normalize an ID with the selected prefix, matching `prefix-<body>` case-insensitively.
 pub fn normalize_id(id: &str, prefix: &str) -> String {
     let trimmed = id.trim();

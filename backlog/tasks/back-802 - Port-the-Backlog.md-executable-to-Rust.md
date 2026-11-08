@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@codex'
 created_date: '2026-11-07T21:53:00Z'
-updated_date: '2026-11-08T20:53:00Z'
+updated_date: '2026-11-08T21:00:00Z'
 labels: []
 dependencies:
   - BACK-801
@@ -19,10 +19,11 @@ references:
   - BACK-802.6
   - BACK-802.7
   - BACK-802.8
+  - BACK-802.9
 modified_files:
   - >-
-    backlog/tasks/back-802.8 -
-    Port-task-ID-normalization-and-allocation-to-Rust.md
+    backlog/tasks/back-802.9 -
+    Port-shared-entity-identity-and-ambiguous-ID-resolution-to-Rust.md
 type: feature
 ordinal: 408000
 ---
@@ -60,17 +61,7 @@ Continue the eight stages in docs/superpowers/specs/2026-11-07-rust-migration-de
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Completed stages: BACK-802.1 managed sections, BACK-802.2 Rust CI, BACK-802.3 config parsing/defaults, and BACK-802.4 native discovery. The Rust library now has reviewed frontmatter, managed-body, config/default and discovery components. Overall executable migration remains In Progress. Next: typed record parsing/serialization, durable storage and Bun-compatible locks before CLI cutover. GitHub reports zero Actions runs; Windows execution is therefore unchecked.
+Completed stages: BACK-802.1 managed sections, BACK-802.2 Rust CI, BACK-802.3 config parsing/defaults, BACK-802.4 native discovery, BACK-802.5 typed record parsing, BACK-802.6 record serialization, BACK-802.7 storage and compatible locks, BACK-802.8 task ID normalization/allocation, BACK-802.9 shared entity identity and ambiguity resolution. Windows execution remains unchecked; GitHub reports zero Actions runs.
 
-BACK-802.5 is complete and pushed. Native typed parsers now cover all four Markdown record families. BACK-802.6 is active for task, decision and document serialization.
-
-BACK-802.6 is complete and pushed. Pure Rust serializers now cover task, decision, and document records. Next: continue storage, locking, and CLI cutover stages in the approved migration plan.
-
-BACK-802.6 is complete and pushed. BACK-802.7 is active for durable record storage and locks compatible with the current executable.
-
-BACK-802.7 is complete and pushed. Rust now provides source-preserving explicit-path storage, no-overwrite creation/moves, and proper-lockfile-compatible create/entity locks. Next: port identity, Git integration, and application operations.
-
-BACK-802.7 is complete and pushed. BACK-802.8 is active for pure task-ID normalization and allocation helpers.
-
-BACK-802.8 is complete; Rust now matches task ID normalization, equality and allocation helpers. Next: shared entity resolution and ambiguous-ID refusal across tasks, decisions and documents.
+Overall executable migration remains In Progress. Rust domain operations, Git integration, CLI behavior, browser server, MCP, TUI, and distribution/cutover gates remain outstanding.
 <!-- SECTION:NOTES:END -->
