@@ -5,6 +5,7 @@ status: In Progress
 assignee:
   - '@codex'
 created_date: '2026-11-07T21:53:00Z'
+updated_date: '2026-11-08T18:59:00Z'
 labels: []
 dependencies:
   - BACK-801
@@ -12,6 +13,11 @@ references:
   - docs/superpowers/specs/2026-11-07-rust-migration-design.md
   - docs/superpowers/specs/rust-contract-inventory.md
   - rust/README.md
+  - BACK-802.3
+modified_files:
+  - >-
+    backlog/tasks/back-802.3 -
+    Port-native-configuration-parsing-and-defaults-to-Rust.md
 type: feature
 ordinal: 408000
 ---
