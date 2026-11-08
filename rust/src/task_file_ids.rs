@@ -43,15 +43,23 @@ fn scan_project(
 ) {
     for directory in TASK_DIRECTORIES {
         let path = project_root.join(backlog_directory).join(directory);
-        scan_directory(&path, task_prefix, ids);
+        for file in list_task_file_paths(&path, task_prefix) {
+            if let Some(filename) = file.file_name().and_then(|filename| filename.to_str())
+                && let Some(id) = extract_id_from_filename(filename, task_prefix)
+            {
+                ids.push(id);
+            }
+        }
     }
 }
 
-fn scan_directory(directory: &Path, task_prefix: &str, ids: &mut Vec<String>) {
+/// List direct Markdown files matching the task prefix, following symlinked files.
+pub fn list_task_file_paths(directory: &Path, task_prefix: &str) -> Vec<std::path::PathBuf> {
     let Ok(entries) = fs::read_dir(directory) else {
-        return;
+        return Vec::new();
     };
     let pattern_prefix = format!("{}-", task_prefix.to_ascii_lowercase());
+    let mut files = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
         let Ok(file_type) = entry.file_type() else {
@@ -75,9 +83,9 @@ fn scan_directory(directory: &Path, task_prefix: &str, ids: &mut Vec<String>) {
                 .extension()
                 .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
             && prefix_matches
-            && let Some(id) = extract_id_from_filename(filename, task_prefix)
         {
-            ids.push(id);
+            files.push(path);
         }
     }
+    files
 }

@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@codex'
 created_date: '2026-11-07T21:53:00Z'
-updated_date: '2026-11-08T21:18:00Z'
+updated_date: '2026-11-08T21:30:00Z'
 labels: []
 dependencies:
   - BACK-801
@@ -22,8 +22,12 @@ references:
   - BACK-802.9
 modified_files:
   - >-
-    backlog/tasks/back-802.9 -
-    Port-shared-entity-identity-and-ambiguous-ID-resolution-to-Rust.md
+    backlog/tasks/back-802.12 -
+    Port-local-task-record-listing-and-lookup-to-Rust.md
+  - rust/src/lib.rs
+  - rust/src/task_file_ids.rs
+  - rust/src/task_store.rs
+  - rust/tests/task_store.rs
 type: feature
 ordinal: 408000
 ---
@@ -68,4 +72,6 @@ Overall executable migration remains In Progress. Rust domain operations, Git in
 BACK-802.10 is complete and pushed. Rust now reads Git repository roots, branch names, and linked worktree paths through the installed Git executable, with optional-Git behavior preserved. Next migration work moves into Rust application operations: identity indexing and record lifecycle/query behavior before the canonical CLI and adapters.
 
 BACK-802.11 is complete and pushed. Rust now gathers filename-based task ID reservations from active and archived files in the current project and linked worktrees. Next: use the Rust model and index in local task CRUD and identity-safe mutation operations; the staged migration remains In Progress.
+
+BACK-802.12 is complete and pushed. Rust now lists local active and archived task records and performs identity-safe active lookup with live TypeScript parity, including malformed and invalid dependency behavior. Next migration work continues into task mutations and canonical CLI operations; the overall migration remains In Progress.
 <!-- SECTION:NOTES:END -->

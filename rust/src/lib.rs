@@ -9,3 +9,4 @@ pub mod sections;
 pub mod serialization;
 pub mod storage;
 pub mod task_file_ids;
+pub mod task_store;
