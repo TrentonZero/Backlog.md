@@ -31,3 +31,34 @@ The [tests](tests/frontmatter.rs) exercise parsing, source preservation,
 references and malformed input. The [implementation plan](../docs/superpowers/plans/2026-11-07-rust-frontmatter.md)
 records dependency choices and verification. This component alone does not
 establish CLI, server, protocol, TUI, concurrency or platform parity.
+
+The [sections module](src/sections.rs) owns task and decision section bodies,
+Acceptance Criteria, Definition of Done and comments. It preserves the existing
+family-specific formats: task edits use canonical ordering and spacing; decision
+edits preserve outside source and wrap existing legacy bodies in markers.
+Omitted section keys retain their values; `None` or an empty string clears a
+requested body. An empty change map returns the original source.
+
+Checklist reads use the sequential indices consumed by indexed application
+operations. Replacements sort supplied items by index, write sequential numbers,
+and retain surrounding prose and known foreign marker blocks. Call
+`assert_valid_checklist_marks` before an indexed checklist change, and
+`assert_section_input_safe` for new task section input. Raw decision editors call
+`validate_decision_editor_structure` before field extraction. These are the
+existing validation boundaries; the future application layer owns their ordering.
+
+The pinned `markdown` parser supplies CommonMark heading boundaries for legacy
+task ambiguity checks and decision sections. Markers, checklists, comments and
+blank-line normalization retain their reference-specific source rules. The
+component performs no filesystem operations.
+
+The [section tests](tests/sections.rs) include direct native regressions and
+actual TypeScript comparisons of parsed data, exact returned source and refusals.
+Those comparisons require the repository's Bun dependencies and Bun on `PATH`;
+set `BACKLOG_REFERENCE_BUN` to an explicit Bun executable when needed:
+
+```sh
+BACKLOG_REFERENCE_BUN=/path/to/bun cargo test --manifest-path rust/Cargo.toml
+```
+
+Bun is only a test reference; the native library does not delegate operations.
