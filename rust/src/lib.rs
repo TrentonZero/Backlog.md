@@ -5,3 +5,4 @@ pub mod frontmatter;
 pub mod records;
 pub mod sections;
 pub mod serialization;
+pub mod storage;
