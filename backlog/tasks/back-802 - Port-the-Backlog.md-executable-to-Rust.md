@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@codex'
 created_date: '2026-11-07T21:53:00Z'
-updated_date: '2026-11-08T21:30:00Z'
+updated_date: '2026-11-08T21:52:00Z'
 labels: []
 dependencies:
   - BACK-801
@@ -22,12 +22,13 @@ references:
   - BACK-802.9
 modified_files:
   - >-
-    backlog/tasks/back-802.12 -
-    Port-local-task-record-listing-and-lookup-to-Rust.md
-  - rust/src/lib.rs
-  - rust/src/task_file_ids.rs
+    backlog/tasks/back-802.13 -
+    Port-identity-safe-task-creation-and-updates-to-Rust.md
+  - rust/src/git.rs
   - rust/src/task_store.rs
   - rust/tests/task_store.rs
+  - rust/tests/task_store_mutations.rs
+  - rust/tests/git.rs
 type: feature
 ordinal: 408000
 ---
@@ -74,4 +75,6 @@ BACK-802.10 is complete and pushed. Rust now reads Git repository roots, branch 
 BACK-802.11 is complete and pushed. Rust now gathers filename-based task ID reservations from active and archived files in the current project and linked worktrees. Next: use the Rust model and index in local task CRUD and identity-safe mutation operations; the staged migration remains In Progress.
 
 BACK-802.12 is complete and pushed. Rust now lists local active and archived task records and performs identity-safe active lookup with live TypeScript parity, including malformed and invalid dependency behavior. Next migration work continues into task mutations and canonical CLI operations; the overall migration remains In Progress.
+
+BACK-802.13 is complete and verified. Rust TaskStore now creates and updates active task records with shared locks, current/linked-worktree allocation, and source-preserving writes. BACK-802.14 tracks the remaining configured branch snapshot task-ID reservations; remote-ref allocation and the rest of the operation layer are still outstanding.
 <!-- SECTION:NOTES:END -->

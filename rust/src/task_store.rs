@@ -1,10 +1,15 @@
 //! Local task record reads with active/archive identity semantics.
 
 use crate::{
-    identity::{canonical_task_id, extract_id_from_filename, normalize_task_id, task_ids_equal},
+    git::GitRepository,
+    identity::{
+        canonical_task_id, extract_id_from_filename, generate_next_id, generate_next_subtask_id,
+        normalize_task_id, task_ids_equal,
+    },
     records::{self, RecordError, TaskRecord},
+    serialization,
     storage::Storage,
-    task_file_ids::list_task_file_paths,
+    task_file_ids::{collect_task_file_ids, list_task_file_paths},
 };
 use std::{
     cmp::Ordering,
@@ -64,6 +69,10 @@ impl Error for AmbiguousTaskIdError {}
 pub enum TaskStoreError {
     Ambiguous(AmbiguousTaskIdError),
     Dependencies(String),
+    CreateLock(String),
+    TaskLock(String),
+    Storage(String),
+    Serialization(String),
 }
 
 impl fmt::Display for TaskStoreError {
@@ -71,6 +80,8 @@ impl fmt::Display for TaskStoreError {
         match self {
             Self::Ambiguous(error) => error.fmt(formatter),
             Self::Dependencies(message) => formatter.write_str(message),
+            Self::CreateLock(message) | Self::TaskLock(message) => formatter.write_str(message),
+            Self::Storage(message) | Self::Serialization(message) => formatter.write_str(message),
         }
     }
 }
@@ -79,19 +90,168 @@ impl Error for TaskStoreError {}
 
 #[derive(Clone, Debug)]
 pub struct TaskStore {
+    project_root: PathBuf,
+    backlog_relative_directory: PathBuf,
     backlog_directory: PathBuf,
     task_prefix: String,
     storage: Storage,
 }
 
 impl TaskStore {
-    pub fn new(backlog_directory: impl Into<PathBuf>, task_prefix: impl Into<String>) -> Self {
-        let backlog_directory = backlog_directory.into();
+    pub fn new(
+        project_root: impl Into<PathBuf>,
+        backlog_relative_directory: impl Into<PathBuf>,
+        task_prefix: impl Into<String>,
+    ) -> Self {
+        let project_root = project_root.into();
+        let backlog_relative_directory = backlog_relative_directory.into();
+        let backlog_directory = project_root.join(&backlog_relative_directory);
+        let common_git_dir = GitRepository::new(&project_root).common_directory();
         Self {
-            storage: Storage::new(&backlog_directory, None),
+            storage: Storage::new(&backlog_directory, common_git_dir),
+            project_root,
+            backlog_relative_directory,
             backlog_directory,
             task_prefix: task_prefix.into(),
         }
+    }
+
+    /// Allocate an ID and create a task while holding the shared create lock.
+    pub fn create_task(
+        &self,
+        mut task: TaskRecord,
+        zero_padding: Option<usize>,
+    ) -> Result<TaskFileEntry, TaskStoreError> {
+        let lock = self
+            .storage
+            .acquire_create_lock()
+            .map_err(|error| {
+                if error.kind() == std::io::ErrorKind::TimedOut {
+                    TaskStoreError::CreateLock(
+                        "Another task create/promote/demote operation is already in progress. Please try again.".into(),
+                    )
+                } else {
+                    TaskStoreError::Storage(error.to_string())
+                }
+            })?;
+        let filename_ids = collect_task_file_ids(
+            &self.project_root,
+            &self.backlog_relative_directory,
+            &self.task_prefix,
+        );
+        let mut existing_ids: Vec<String> = self
+            .all_task_paths()
+            .iter()
+            .filter_map(|path| self.storage.read(path).ok())
+            .filter_map(|source| records::parse_task(&source).ok())
+            .map(|record| record.id)
+            .collect();
+        existing_ids.extend(filename_ids);
+        let id_refs: Vec<&str> = existing_ids.iter().map(String::as_str).collect();
+        task.id = if let Some(parent_id) = task.parent_task_id.as_deref() {
+            generate_next_subtask_id(&id_refs, parent_id, &self.task_prefix, zero_padding)
+        } else {
+            generate_next_id(&id_refs, &self.task_prefix, zero_padding)
+        };
+
+        let path = self.task_path(&task.id, &task.title);
+        let source = serialization::serialize_task(&task, "")
+            .map_err(|error| TaskStoreError::Serialization(error.to_string()))?;
+        let saved_task = records::parse_task(&source)
+            .map_err(|error| TaskStoreError::Serialization(error.to_string()))?;
+        lock.check()
+            .map_err(|error| TaskStoreError::CreateLock(error.to_string()))?;
+        self.storage
+            .write_record(&path, &source, None)
+            .map_err(|error| TaskStoreError::Storage(error.to_string()))?;
+        Ok(TaskFileEntry {
+            task: saved_task,
+            path,
+        })
+    }
+
+    /// Update a uniquely identified active task under its shared per-task entity lock.
+    pub fn update_task(
+        &self,
+        mut task: TaskRecord,
+    ) -> Result<Option<TaskFileEntry>, TaskStoreError> {
+        let Some(current) = self.load_task(&task.id)? else {
+            return Ok(None);
+        };
+        let lock = self
+            .storage
+            .acquire_entity_lock("task", &current.task.id, &current.path)
+            .map_err(|error| {
+                let message = if error.kind() == std::io::ErrorKind::WouldBlock {
+                    format!(
+                        "Edit failed: {} is being modified by another process; retry if appropriate.",
+                        current.task.id
+                    )
+                } else if error.kind() == std::io::ErrorKind::NotFound {
+                    format!(
+                        "Edit failed: {} was moved or removed by another process.",
+                        current.task.id
+                    )
+                } else {
+                    error.to_string()
+                };
+                TaskStoreError::TaskLock(message)
+            })?;
+        let Some(current_after_lock) = self.load_task(&task.id)? else {
+            return Ok(None);
+        };
+        if current_after_lock.path != current.path {
+            return Err(TaskStoreError::TaskLock(format!(
+                "Edit failed: {} was moved or removed by another process.",
+                current.task.id
+            )));
+        }
+        let current = current_after_lock;
+        let original = self
+            .storage
+            .read(&current.path)
+            .map_err(|error| TaskStoreError::Storage(error.to_string()))?;
+        let existing_task = records::parse_task(&original)
+            .map_err(|error| TaskStoreError::Serialization(error.to_string()))?;
+        task.id = if !existing_task.id.is_empty()
+            && task_ids_equal(&existing_task.id, &task.id, &self.task_prefix)
+        {
+            existing_task.id.clone()
+        } else {
+            current.task.id.clone()
+        };
+        if let (Some(existing_parent), Some(parent)) = (
+            existing_task.parent_task_id.as_ref(),
+            task.parent_task_id.as_mut(),
+        ) && task_ids_equal(existing_parent, parent, &self.task_prefix)
+        {
+            *parent = existing_parent.clone();
+        }
+        let source = serialization::serialize_task(&task, &original)
+            .map_err(|error| TaskStoreError::Serialization(error.to_string()))?;
+        let saved_task = records::parse_task(&source)
+            .map_err(|error| TaskStoreError::Serialization(error.to_string()))?;
+        lock.check().map_err(|_| {
+            TaskStoreError::TaskLock(format!(
+                "Edit failed: {} is being modified by another process; retry if appropriate.",
+                current.task.id
+            ))
+        })?;
+        self.storage
+            .write_record(&current.path, &source, Some(&current.path))
+            .map_err(|error| TaskStoreError::Storage(error.to_string()))?;
+        Ok(Some(TaskFileEntry {
+            task: saved_task,
+            path: current.path,
+        }))
+    }
+
+    fn task_path(&self, id: &str, title: &str) -> PathBuf {
+        self.backlog_directory.join("tasks").join(format!(
+            "{} - {}.md",
+            id.to_lowercase(),
+            sanitize_filename(title)
+        ))
     }
 
     pub fn list_tasks(&self) -> Vec<TaskFileEntry> {
@@ -228,6 +388,36 @@ fn is_dependency_error(error: &RecordError) -> bool {
     error
         .to_string()
         .starts_with("Invalid dependencies in task ")
+}
+
+fn sanitize_filename(title: &str) -> String {
+    let sanitized: String = title
+        .chars()
+        .map(|character| {
+            if "<>:\"/\\|?*".contains(character) {
+                '-'
+            } else if "'(),!@#$%^&+={}[];".contains(character) {
+                '\0'
+            } else if character.is_whitespace() {
+                '-'
+            } else {
+                character
+            }
+        })
+        .filter(|character| *character != '\0')
+        .collect();
+    let mut collapsed = String::new();
+    for character in sanitized.chars() {
+        if character != '-' || !collapsed.ends_with('-') {
+            collapsed.push(character);
+        }
+    }
+    let trimmed = collapsed.trim_matches('-');
+    if trimmed.is_empty() {
+        "untitled".into()
+    } else {
+        trimmed.into()
+    }
 }
 
 fn sort_entries(mut entries: Vec<TaskFileEntry>) -> Vec<TaskFileEntry> {

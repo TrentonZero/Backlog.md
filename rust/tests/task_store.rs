@@ -115,7 +115,7 @@ fn local_task_lists_and_lookups_match_live_typescript() {
     );
 
     let expected = reference(&fixture.0);
-    let store = TaskStore::new(fixture.0.join("backlog"), "task");
+    let store = TaskStore::new(&fixture.0, "backlog", "task");
     let active = store.list_tasks();
     let archived = store.list_archived_tasks();
     let lookups = ["1", "2", "3", "5", "8", "99"].map(|id| {
@@ -124,6 +124,7 @@ fn local_task_lists_and_lookups_match_live_typescript() {
             Ok(None) => json!({"id": id, "record": null}),
             Err(TaskStoreError::Ambiguous(error)) => json!({"id": id, "error": {"name": error.name, "message": error.to_string(), "candidates": error.candidates}}),
             Err(TaskStoreError::Dependencies(message)) => json!({"id": id, "error": {"name": "TaskDependenciesParseError", "message": message}}),
+            Err(error) => json!({"id": id, "error": {"name": "TaskStoreError", "message": error.to_string()}}),
         }
     });
     let actual = json!({

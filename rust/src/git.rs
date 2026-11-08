@@ -38,6 +38,24 @@ impl GitRepository {
         (!root.is_empty()).then(|| PathBuf::from(root))
     }
 
+    /// Return Git's shared directory for lock files coordinated across linked worktrees.
+    pub fn common_directory(&self) -> Option<PathBuf> {
+        let output = self.run(&["rev-parse", "--git-common-dir"])?;
+        if !output.status.success() {
+            return None;
+        }
+        let directory = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        if directory.is_empty() {
+            return None;
+        }
+        let path = PathBuf::from(directory);
+        Some(if path.is_absolute() {
+            path
+        } else {
+            self.project_root.join(path)
+        })
+    }
+
     pub fn current_branch(&self) -> String {
         if !self.is_repository() {
             return String::new();

@@ -111,6 +111,7 @@ fn repository_root_branch_and_linked_worktrees_match_live_typescript() {
 
     let expected = reference(&fixture.0, None);
     let repository = GitRepository::new(&fixture.0);
+    assert_eq!(repository.common_directory(), Some(fixture.0.join(".git")));
     let actual = serde_json::json!({
         "repository": repository.is_repository(),
         "root": repository.repository_root(),
@@ -121,6 +122,10 @@ fn repository_root_branch_and_linked_worktrees_match_live_typescript() {
 
     let expected_detached = reference(&detached, None);
     let actual_detached = GitRepository::new(&detached);
+    assert_eq!(
+        actual_detached.common_directory(),
+        Some(fixture.0.join(".git"))
+    );
     assert_eq!(
         serde_json::json!({
             "repository": actual_detached.is_repository(),
