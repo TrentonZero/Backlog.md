@@ -14,7 +14,7 @@ use crate::{
 };
 use std::{
     cmp::Ordering,
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, HashSet},
     error::Error,
     fmt, fs,
     path::{Path, PathBuf},
@@ -602,42 +602,26 @@ impl TaskStore {
                         })
                 })
                 .collect();
-        let all_drafts = list_task_file_paths(&self.backlog_directory.join("drafts"), "draft");
-        let mut parsed = Vec::new();
-        let mut counts = HashMap::<String, usize>::new();
-        for path in all_drafts {
-            let Some(filename) = path.file_name().and_then(|name| name.to_str()) else {
-                continue;
-            };
-            let Some(file_id) = extract_id_from_filename(filename, "draft") else {
-                continue;
-            };
-            let key = canonical_task_id(&file_id, "draft");
-            *counts.entry(key.clone()).or_default() += 1;
-            let Ok(source) = self.storage.read(&path) else {
-                continue;
-            };
-            let Ok(task) = records::parse_task(&source) else {
-                continue;
-            };
-            if task_ids_equal(&task.id, &file_id, "draft") {
-                parsed.push(DraftFileEntry {
-                    id: key,
-                    task,
-                    path,
-                });
-            }
-        }
-        let drafts = parsed
-            .into_iter()
-            .filter(|entry| {
-                counts.get(&entry.id).copied() == Some(1)
-                    && (task_links_target(&entry.task, target_id, &self.task_prefix)
-                        || entry.task.parent_task_id.as_deref().is_some_and(|parent| {
-                            task_ids_equal(parent, target_id, &self.task_prefix)
-                        }))
-            })
-            .collect();
+        let drafts = crate::draft_store::DraftStore::new(
+            &self.project_root,
+            &self.backlog_relative_directory,
+        )
+        .healthy_unique_drafts()
+        .into_iter()
+        .map(|(id, entry)| DraftFileEntry {
+            id,
+            task: entry.task,
+            path: entry.path,
+        })
+        .filter(|entry| {
+            task_links_target(&entry.task, target_id, &self.task_prefix)
+                || entry
+                    .task
+                    .parent_task_id
+                    .as_deref()
+                    .is_some_and(|parent| task_ids_equal(parent, target_id, &self.task_prefix))
+        })
+        .collect();
         VacatedLinkRecords { tasks, drafts }
     }
 
@@ -960,7 +944,7 @@ fn sort_entries(mut entries: Vec<TaskFileEntry>) -> Vec<TaskFileEntry> {
     entries
 }
 
-fn compare_task_ids(left: &str, right: &str) -> Ordering {
+pub(crate) fn compare_task_ids(left: &str, right: &str) -> Ordering {
     let left_parts = sortable_id_parts(left);
     let right_parts = sortable_id_parts(right);
     for index in 0..left_parts.len().max(right_parts.len()) {
