@@ -22,6 +22,12 @@ use std::{
 
 const ARCHIVED_TASK_DIRECTORIES: [&str; 2] = ["archive/tasks", "completed"];
 
+#[derive(Clone, Copy)]
+enum TaskMoveOperation {
+    Archive,
+    Restore,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct TaskFileEntry {
     pub task: TaskRecord,
@@ -69,7 +75,11 @@ impl Error for AmbiguousTaskIdError {}
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TaskStoreError {
     Ambiguous(AmbiguousTaskIdError),
+    ArchiveFileExists { id: String, filename: String },
+    Archived(String),
     Dependencies(String),
+    NotArchived(String),
+    RestoreFileExists { id: String, filename: String },
     CreateLock(String),
     TaskLock(String),
     Storage(String),
@@ -80,7 +90,23 @@ impl fmt::Display for TaskStoreError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Ambiguous(error) => error.fmt(formatter),
+            Self::Archived(id) => write!(
+                formatter,
+                "Task {id} is archived. Archived tasks are read-only. Restore it to the board first: backlog task restore {id}"
+            ),
             Self::Dependencies(message) => formatter.write_str(message),
+            Self::ArchiveFileExists { id, filename } => write!(
+                formatter,
+                "Task {id} cannot be archived: the archive already has a file named {filename}."
+            ),
+            Self::NotArchived(id) => write!(
+                formatter,
+                "Task {id} is not archived. It is already on the board."
+            ),
+            Self::RestoreFileExists { id, filename } => write!(
+                formatter,
+                "Task {id} cannot be restored: the board already has a file named {filename}."
+            ),
             Self::CreateLock(message) | Self::TaskLock(message) => formatter.write_str(message),
             Self::Storage(message) | Self::Serialization(message) => formatter.write_str(message),
         }
@@ -250,6 +276,110 @@ impl TaskStore {
             task: saved_task,
             path: current.path,
         }))
+    }
+
+    /// Move an active task into the archive without rewriting its Markdown source.
+    pub fn archive_task(&self, id: &str) -> Result<bool, TaskStoreError> {
+        let Some(task) = self.load_task(id)? else {
+            if self.find_archived_task(id)?.is_some() {
+                return Err(TaskStoreError::Archived(id.to_owned()));
+            }
+            return Ok(false);
+        };
+        let task_lock = self.acquire_move_task_lock(&task)?;
+        let create_lock = self
+            .storage
+            .acquire_create_lock()
+            .map_err(|error| TaskStoreError::CreateLock(error.to_string()))?;
+        let Some(current) = self.load_task(id)? else {
+            return Ok(false);
+        };
+        let destination = self
+            .backlog_directory
+            .join("archive/tasks")
+            .join(current.path.file_name().unwrap_or_default());
+        task_lock.check().map_err(|error| {
+            TaskStoreError::TaskLock(format!("Archive failed: {}: {error}", current.task.id))
+        })?;
+        create_lock.check().map_err(|error| {
+            TaskStoreError::CreateLock(format!("Archive failed: {}: {error}", current.task.id))
+        })?;
+        self.storage
+            .move_record(&current.path, &destination)
+            .map_err(|error| {
+                move_error(error, &current, TaskMoveOperation::Archive, &destination)
+            })?;
+        Ok(true)
+    }
+
+    /// Restore an archived task to the active directory without rewriting its Markdown source.
+    pub fn restore_task(&self, id: &str) -> Result<bool, TaskStoreError> {
+        if let Some(active) = self.load_task(id)? {
+            return Err(TaskStoreError::NotArchived(active.task.id));
+        }
+        let Some(task) = self.find_archived_task(id)? else {
+            return Ok(false);
+        };
+        let task_lock = self.acquire_move_task_lock(&task)?;
+        let create_lock = self
+            .storage
+            .acquire_create_lock()
+            .map_err(|error| TaskStoreError::CreateLock(error.to_string()))?;
+        let Some(current) = self.find_archived_task(id)? else {
+            return Ok(false);
+        };
+        let destination = self
+            .backlog_directory
+            .join("tasks")
+            .join(current.path.file_name().unwrap_or_default());
+        task_lock.check().map_err(|error| {
+            TaskStoreError::TaskLock(format!("Restore failed: {}: {error}", current.task.id))
+        })?;
+        create_lock.check().map_err(|error| {
+            TaskStoreError::CreateLock(format!("Restore failed: {}: {error}", current.task.id))
+        })?;
+        self.storage
+            .move_record(&current.path, &destination)
+            .map_err(|error| {
+                move_error(error, &current, TaskMoveOperation::Restore, &destination)
+            })?;
+        Ok(true)
+    }
+
+    fn acquire_move_task_lock(
+        &self,
+        task: &TaskFileEntry,
+    ) -> Result<crate::storage::FileLock, TaskStoreError> {
+        self.storage
+            .acquire_entity_lock("task", &task.task.id, &task.path)
+            .map_err(|error| {
+                TaskStoreError::TaskLock(if error.kind() == std::io::ErrorKind::WouldBlock {
+                    format!(
+                        "Task {} is being modified by another process; retry if appropriate.",
+                        task.task.id
+                    )
+                } else {
+                    error.to_string()
+                })
+            })
+    }
+
+    fn find_archived_task(&self, id: &str) -> Result<Option<TaskFileEntry>, TaskStoreError> {
+        let matches: Vec<_> = self
+            .list_archived_tasks()
+            .into_iter()
+            .filter(|entry| task_ids_equal(id, &entry.task.id, &self.task_prefix))
+            .collect();
+        if matches.len() > 1 {
+            return Err(TaskStoreError::Ambiguous(AmbiguousTaskIdError::new(
+                id,
+                matches
+                    .iter()
+                    .map(|entry| entry.path.display().to_string())
+                    .collect(),
+            )));
+        }
+        Ok(matches.into_iter().next())
     }
 
     fn task_path(&self, id: &str, title: &str) -> PathBuf {
@@ -442,6 +572,33 @@ fn is_dependency_error(error: &RecordError) -> bool {
     error
         .to_string()
         .starts_with("Invalid dependencies in task ")
+}
+
+fn move_error(
+    error: std::io::Error,
+    task: &TaskFileEntry,
+    operation: TaskMoveOperation,
+    destination: &Path,
+) -> TaskStoreError {
+    if error.kind() == std::io::ErrorKind::AlreadyExists {
+        let filename = destination
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        match operation {
+            TaskMoveOperation::Archive => TaskStoreError::ArchiveFileExists {
+                id: task.task.id.clone(),
+                filename,
+            },
+            TaskMoveOperation::Restore => TaskStoreError::RestoreFileExists {
+                id: task.task.id.clone(),
+                filename,
+            },
+        }
+    } else {
+        TaskStoreError::Storage(error.to_string())
+    }
 }
 
 fn sanitize_filename(title: &str) -> String {

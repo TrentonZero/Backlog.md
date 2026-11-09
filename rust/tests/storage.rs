@@ -90,6 +90,66 @@ fn storage_updates_in_place_and_moves_to_an_unoccupied_path() {
 }
 
 #[test]
+fn storage_moves_records_without_replacing_the_destination() {
+    let root = temp_dir();
+    let source = root.join("active/task-1.md");
+    let destination = root.join("archive/task-1.md");
+    fs::create_dir_all(source.parent().unwrap()).unwrap();
+    fs::create_dir_all(destination.parent().unwrap()).unwrap();
+    fs::write(&source, "original source bytes\r\n").unwrap();
+    fs::write(&destination, "existing destination bytes\n").unwrap();
+    let storage = Storage::new(root.0.clone(), None);
+
+    let error = storage.move_record(&source, &destination).unwrap_err();
+
+    assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+    assert_eq!(
+        fs::read_to_string(&source).unwrap(),
+        "original source bytes\r\n"
+    );
+    assert_eq!(
+        fs::read_to_string(&destination).unwrap(),
+        "existing destination bytes\n"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn storage_moves_symlinks_without_changing_the_linked_file() {
+    use std::os::unix::fs::symlink;
+
+    let root = temp_dir();
+    let target_file = root.join("elsewhere/task.md");
+    let source = root.join("backlog/archive/tasks/task.md");
+    let destination = root.join("backlog/tasks/task.md");
+    fs::create_dir_all(target_file.parent().unwrap()).unwrap();
+    fs::create_dir_all(source.parent().unwrap()).unwrap();
+    fs::write(&target_file, "linked source bytes\r\n").unwrap();
+    symlink("../../../elsewhere/task.md", &source).unwrap();
+    let expected_target = fs::canonicalize(&target_file).unwrap();
+    let storage = Storage::new(root.0.clone(), None);
+
+    storage.move_record(&source, &destination).unwrap();
+
+    assert!(!source.exists());
+    assert!(
+        fs::symlink_metadata(&destination)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(
+        fs::read_link(&destination).unwrap(),
+        std::path::Path::new("../../elsewhere/task.md")
+    );
+    assert_eq!(fs::canonicalize(&destination).unwrap(), expected_target);
+    assert_eq!(
+        fs::read_to_string(&target_file).unwrap(),
+        "linked source bytes\r\n"
+    );
+}
+
+#[test]
 fn missing_move_source_still_writes_the_free_target() {
     let root = temp_dir();
     let source = root.join("removed.md");

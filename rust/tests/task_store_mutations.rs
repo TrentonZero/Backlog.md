@@ -80,6 +80,121 @@ process.stdout.write(JSON.stringify({id, path, created, updated, taskLockError})
     serde_json::from_slice(&output.stdout).unwrap()
 }
 
+fn reference_archive_restore(root: &Path) -> Value {
+    const SCRIPT: &str = r#"
+import { Core } from "./src/core/backlog.ts";
+const core = new Core(process.env.BACKLOG_MUTATION_ROOT);
+const task = {
+  id: "TASK-1", title: "A created task", status: "To Do", assignee: [], labels: [], dependencies: [],
+  references: [], documentation: [], modifiedFiles: [], rawContent: "Unmanaged notes\n",
+  createdDate: "2025-01-01", description: "Initial description", acceptanceCriteriaItems: [],
+  definitionOfDoneItems: [],
+};
+const path = await core.filesystem.saveTask(task);
+const original = await Bun.file(path).text();
+const archived = await core.archiveTask(task.id, false, { includeCrossBranch: false });
+const archivePath = `${core.filesystem.archiveTasksDir}/${path.split("/").at(-1)}`;
+const archivedContent = await Bun.file(archivePath).text();
+const nextId = await core.generateNextId();
+const restored = await core.restoreTask(task.id, false, { includeCrossBranch: false });
+const restoredContent = await Bun.file(path).text();
+process.stdout.write(JSON.stringify({ archived, restored, original, archivedContent, restoredContent, nextId }));
+"#;
+    let bun = std::env::var_os("BACKLOG_REFERENCE_BUN").unwrap_or_else(|| "bun".into());
+    let output = Command::new(bun)
+        .args(["--eval", SCRIPT])
+        .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap())
+        .env("BACKLOG_MUTATION_ROOT", root)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("run live TypeScript archive and restore operations");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).unwrap()
+}
+
+fn reference_lifecycle_state_errors(root: &Path) -> Value {
+    const SCRIPT: &str = r#"
+import { Core } from "./src/core/backlog.ts";
+const core = new Core(process.env.BACKLOG_MUTATION_ROOT);
+function task(id) {
+  return {
+    id, title: `Task ${id}`, status: "To Do", assignee: [], labels: [], dependencies: [], references: [],
+    documentation: [], modifiedFiles: [], rawContent: "Body\n", createdDate: "2025-01-01",
+    description: "", acceptanceCriteriaItems: [], definitionOfDoneItems: [],
+  };
+}
+
+await core.filesystem.saveTask(task("TASK-1"));
+await core.filesystem.saveTask(task("TASK-2"));
+await core.archiveTask("TASK-2", false, { includeCrossBranch: false });
+const duplicatePath = await core.filesystem.saveTask(task("TASK-3"));
+await Bun.write(`${core.filesystem.tasksDir}/task-03 - Duplicate.md`, await Bun.file(duplicatePath).text());
+await Bun.write(`${core.filesystem.tasksDir}/task-4 - Malformed.md`, "---\nid: [\n---\n");
+async function capture(action) {
+  try { return { result: await action() }; }
+  catch (error) { return { name: error.name, message: error.message }; }
+}
+const missingArchive = await core.archiveTask("TASK-404", false, { includeCrossBranch: false });
+const missingRestore = await core.restoreTask("TASK-404", false, { includeCrossBranch: false });
+const archiveArchived = await capture(() => core.archiveTask("TASK-2", false, { includeCrossBranch: false }));
+const restoreActive = await capture(() => core.restoreTask("TASK-1", false, { includeCrossBranch: false }));
+const ambiguousArchive = await capture(() => core.archiveTask("TASK-3", false, { includeCrossBranch: false }));
+const malformedArchive = await core.archiveTask("TASK-4", false, { includeCrossBranch: false });
+process.stdout.write(JSON.stringify({ missingArchive, missingRestore, archiveArchived, restoreActive, ambiguousArchive, malformedArchive }));
+"#;
+    let bun = std::env::var_os("BACKLOG_REFERENCE_BUN").unwrap_or_else(|| "bun".into());
+    let output = Command::new(bun)
+        .args(["--eval", SCRIPT])
+        .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap())
+        .env("BACKLOG_MUTATION_ROOT", root)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("run live TypeScript lifecycle refusal operations");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).unwrap()
+}
+
+fn reference_task_move_collision(root: &Path, operation: &str) -> Value {
+    const SCRIPT: &str = r#"
+import { Core } from "./src/core/backlog.ts";
+const core = new Core(process.env.BACKLOG_MUTATION_ROOT);
+try {
+  const result = process.env.BACKLOG_OPERATION === "archive"
+    ? await core.archiveTask("TASK-1", false, { includeCrossBranch: false })
+    : await core.restoreTask("TASK-1", false, { includeCrossBranch: false });
+  process.stdout.write(JSON.stringify({ result }));
+} catch (error) {
+  process.stdout.write(JSON.stringify({ name: error.name, message: error.message }));
+}
+"#;
+    let bun = std::env::var_os("BACKLOG_REFERENCE_BUN").unwrap_or_else(|| "bun".into());
+    let output = Command::new(bun)
+        .args(["--eval", SCRIPT])
+        .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap())
+        .env("BACKLOG_MUTATION_ROOT", root)
+        .env("BACKLOG_OPERATION", operation)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("run live TypeScript task move collision");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).unwrap()
+}
+
 fn initial_task() -> backlog_md::records::TaskRecord {
     let mut task = parse_task(
         "---\nid: TASK-999\ntitle: A created task\nstatus: To Do\ncreated_date: '2025-01-01'\n---\nUnmanaged notes\n",
@@ -171,6 +286,152 @@ fn create_and_update_match_live_typescript_files() {
         json!({"id": updated.task.id}),
         json!({"id": expected_updated.id})
     );
+}
+
+#[test]
+fn archive_and_restore_match_live_typescript_source_and_id_occupancy() {
+    let fixture = Fixture::new();
+    let typescript_root = fixture.0.join("typescript-lifecycle");
+    let rust_root = fixture.0.join("rust-lifecycle");
+    std::fs::create_dir_all(&typescript_root).unwrap();
+    std::fs::create_dir_all(&rust_root).unwrap();
+    let source = "---\nid: TASK-1\ntitle: A created task\nstatus: To Do\ncreated_date: '2025-01-01'\ndescription: Initial description\n---\nUnmanaged notes\n";
+    let task_path = rust_root.join("backlog/tasks/task-1 - A-created-task.md");
+    std::fs::create_dir_all(task_path.parent().unwrap()).unwrap();
+    std::fs::write(&task_path, source).unwrap();
+
+    let expected = reference_archive_restore(&typescript_root);
+    let store = TaskStore::new(&rust_root, "backlog", "task");
+    assert!(store.archive_task("TASK-1").unwrap());
+    let archived_path = rust_root
+        .join("backlog/archive/tasks")
+        .join(task_path.file_name().unwrap());
+    assert_eq!(std::fs::read_to_string(&archived_path).unwrap(), source);
+    let created = store
+        .create_task(initial_task(), &Config::default())
+        .unwrap();
+    assert_eq!(created.task.id, "TASK-2");
+    assert_eq!(expected["nextId"], "TASK-2");
+
+    assert!(store.restore_task("TASK-1").unwrap());
+    assert_eq!(std::fs::read_to_string(&task_path).unwrap(), source);
+    assert_eq!(expected["archived"], true);
+    assert_eq!(expected["restored"], true);
+    assert_eq!(expected["archivedContent"], expected["original"]);
+    assert_eq!(expected["restoredContent"], expected["original"]);
+}
+
+#[test]
+fn task_archive_restore_missing_and_wrong_state_match_live_typescript() {
+    let fixture = Fixture::new();
+    let typescript_root = fixture.0.join("typescript-lifecycle-errors");
+    let rust_root = fixture.0.join("rust-lifecycle-errors");
+    std::fs::create_dir_all(&typescript_root).unwrap();
+    let tasks_directory = rust_root.join("backlog/tasks");
+    std::fs::create_dir_all(&tasks_directory).unwrap();
+    std::fs::write(
+        tasks_directory.join("task-1 - Task-TASK-1.md"),
+        task_markdown("TASK-1"),
+    )
+    .unwrap();
+    std::fs::write(
+        tasks_directory.join("task-2 - Task-TASK-2.md"),
+        task_markdown("TASK-2"),
+    )
+    .unwrap();
+    std::fs::write(
+        tasks_directory.join("task-3 - Task-TASK-3.md"),
+        task_markdown("TASK-3"),
+    )
+    .unwrap();
+    std::fs::write(
+        tasks_directory.join("task-03 - Duplicate.md"),
+        task_markdown("TASK-03"),
+    )
+    .unwrap();
+    std::fs::write(
+        tasks_directory.join("task-4 - Malformed.md"),
+        "---\nid: [\n---\n",
+    )
+    .unwrap();
+
+    let expected = reference_lifecycle_state_errors(&typescript_root);
+    let store = TaskStore::new(&rust_root, "backlog", "task");
+    assert!(store.archive_task("TASK-2").unwrap());
+    assert_eq!(expected["missingArchive"], false);
+    assert_eq!(expected["missingRestore"], false);
+    assert!(!store.archive_task("TASK-404").unwrap());
+    assert!(!store.restore_task("TASK-404").unwrap());
+    let archived = store.archive_task("TASK-2").unwrap_err();
+    let not_archived = store.restore_task("TASK-1").unwrap_err();
+    assert!(matches!(archived, TaskStoreError::Archived(_)));
+    assert!(matches!(not_archived, TaskStoreError::NotArchived(_)));
+    assert_eq!(archived.to_string(), expected["archiveArchived"]["message"]);
+    assert_eq!(
+        not_archived.to_string(),
+        expected["restoreActive"]["message"]
+    );
+    assert_eq!(expected["archiveArchived"]["name"], "TaskArchivedError");
+    assert_eq!(expected["restoreActive"]["name"], "TaskNotArchivedError");
+    let ambiguous = store.archive_task("TASK-3").unwrap_err();
+    assert!(matches!(ambiguous, TaskStoreError::Ambiguous(_)));
+    assert_eq!(expected["ambiguousArchive"]["name"], "AmbiguousTaskIdError");
+    assert_eq!(expected["malformedArchive"], false);
+    assert!(!store.archive_task("TASK-4").unwrap());
+}
+
+#[test]
+fn task_archive_and_restore_collisions_preserve_both_files() {
+    let fixture = Fixture::new();
+    for operation in ["archive", "restore"] {
+        let typescript_root = fixture.0.join(format!("typescript-collision-{operation}"));
+        let rust_root = fixture.0.join(format!("rust-collision-{operation}"));
+        let active_path = "backlog/tasks/task-1 - A-created-task.md";
+        let archived_path = "backlog/archive/tasks/task-1 - A-created-task.md";
+        let (source_path, destination_path) = if operation == "archive" {
+            (active_path, archived_path)
+        } else {
+            (archived_path, active_path)
+        };
+        let source_content = task_markdown("TASK-1");
+        let destination_content = "malformed destination obstacle\n";
+        for root in [&typescript_root, &rust_root] {
+            let source = root.join(source_path);
+            let destination = root.join(destination_path);
+            std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+            std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+            std::fs::write(source, &source_content).unwrap();
+            std::fs::write(destination, destination_content).unwrap();
+        }
+
+        let expected = reference_task_move_collision(&typescript_root, operation);
+        let store = TaskStore::new(&rust_root, "backlog", "task");
+        let error = if operation == "archive" {
+            store.archive_task("TASK-1").unwrap_err()
+        } else {
+            store.restore_task("TASK-1").unwrap_err()
+        };
+        assert!(matches!(
+            &error,
+            TaskStoreError::ArchiveFileExists { .. } | TaskStoreError::RestoreFileExists { .. }
+        ));
+        assert_eq!(error.to_string(), expected["message"]);
+        assert_eq!(expected["name"], "TaskFileExistsError");
+        assert_eq!(
+            std::fs::read_to_string(rust_root.join(source_path)).unwrap(),
+            source_content
+        );
+        assert_eq!(
+            std::fs::read_to_string(rust_root.join(destination_path)).unwrap(),
+            destination_content
+        );
+    }
+}
+
+fn task_markdown(id: &str) -> String {
+    format!(
+        "---\nid: {id}\ntitle: Task {id}\nstatus: To Do\ncreated_date: '2025-01-01'\n---\nBody\n"
+    )
 }
 
 fn normalize_source(source: &str) -> String {

@@ -4,7 +4,7 @@ use fs2::FileExt;
 use std::{
     fs::{self, OpenOptions},
     io::{self, Write},
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     sync::{Arc, Condvar, Mutex},
     thread::{self, JoinHandle},
     time::{Duration, Instant, SystemTime},
@@ -85,6 +85,35 @@ impl Storage {
         result
     }
 
+    /// Move a record to an unoccupied path without changing its bytes or metadata.
+    pub fn move_record(&self, source: &Path, target: &Path) -> io::Result<()> {
+        if source == target {
+            return Ok(());
+        }
+        let parent = target.parent().unwrap_or_else(|| Path::new("."));
+        fs::create_dir_all(parent)?;
+        if fs::symlink_metadata(source)?.file_type().is_symlink() {
+            let link_target = fs::read_link(source)?;
+            let link_target = if link_target.is_absolute() {
+                link_target
+            } else {
+                let target_directory = fs::canonicalize(parent)?;
+                relative_path(&target_directory, &fs::canonicalize(source)?)
+            };
+            create_file_symlink(&link_target, target)?;
+        } else {
+            fs::hard_link(source, target)?;
+        }
+        if let Err(error) = fs::remove_file(source) {
+            if error.kind() == io::ErrorKind::NotFound {
+                return Ok(());
+            }
+            let _ = fs::remove_file(target);
+            return Err(error);
+        }
+        Ok(())
+    }
+
     /// Acquire the shared task-ID allocation lock used by create/promote/demote operations.
     pub fn acquire_create_lock(&self) -> io::Result<FileLock> {
         let lock_dir = self.create_lock_path();
@@ -118,6 +147,67 @@ impl Storage {
             Some(common_git_dir) => common_git_dir.join("backlog.md/locks/create"),
             None => self.backlog_dir.join(".locks/create"),
         }
+    }
+}
+
+fn create_file_symlink(source: &Path, target: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(source, target)
+    }
+    #[cfg(windows)]
+    {
+        std::os::windows::fs::symlink_file(source, target)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (source, target);
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "file symlinks are unsupported on this platform",
+        ))
+    }
+}
+
+fn relative_path(from: &Path, to: &Path) -> PathBuf {
+    let from: Vec<_> = from.components().collect();
+    let to: Vec<_> = to.components().collect();
+    if from
+        .first()
+        .zip(to.first())
+        .is_some_and(|(left, right)| !same_path_component(left, right))
+    {
+        return to.iter().fold(PathBuf::new(), |mut path, component| {
+            path.push(component.as_os_str());
+            path
+        });
+    }
+    let common = from
+        .iter()
+        .zip(&to)
+        .take_while(|(left, right)| same_path_component(left, right))
+        .count();
+    let mut relative = PathBuf::new();
+    for _ in &from[common..] {
+        relative.push("..");
+    }
+    for component in &to[common..] {
+        relative.push(component.as_os_str());
+    }
+    if relative.as_os_str().is_empty() {
+        PathBuf::from(".")
+    } else {
+        relative
+    }
+}
+
+fn same_path_component(left: &Component<'_>, right: &Component<'_>) -> bool {
+    if cfg!(windows) {
+        left.as_os_str()
+            .to_string_lossy()
+            .eq_ignore_ascii_case(&right.as_os_str().to_string_lossy())
+    } else {
+        left == right
     }
 }
 
