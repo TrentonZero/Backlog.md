@@ -14,7 +14,7 @@ use crate::{
 };
 use std::{
     cmp::Ordering,
-    collections::HashSet,
+    collections::{BTreeMap, HashMap, HashSet},
     error::Error,
     fmt, fs,
     path::{Path, PathBuf},
@@ -32,6 +32,24 @@ enum TaskMoveOperation {
 pub struct TaskFileEntry {
     pub task: TaskRecord,
     pub path: PathBuf,
+}
+
+#[derive(Clone)]
+struct DraftFileEntry {
+    id: String,
+    task: TaskRecord,
+    path: PathBuf,
+}
+
+struct VacatedLinkRecords {
+    tasks: Vec<TaskFileEntry>,
+    drafts: Vec<DraftFileEntry>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TaskDeletionResult {
+    pub success: bool,
+    pub cleaned_task_ids: Vec<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -77,8 +95,10 @@ pub enum TaskStoreError {
     Ambiguous(AmbiguousTaskIdError),
     ArchiveFileExists { id: String, filename: String },
     Archived(String),
+    HasSubtasks { id: String, child_ids: Vec<String> },
     Dependencies(String),
     NotArchived(String),
+    DeleteActive(String),
     RestoreFileExists { id: String, filename: String },
     CreateLock(String),
     TaskLock(String),
@@ -95,6 +115,15 @@ impl fmt::Display for TaskStoreError {
                 "Task {id} is archived. Archived tasks are read-only. Restore it to the board first: backlog task restore {id}"
             ),
             Self::Dependencies(message) => formatter.write_str(message),
+            Self::HasSubtasks { id, child_ids } => write!(
+                formatter,
+                "Task {id} cannot be deleted while its subtasks exist: {}.",
+                child_ids.join(", ")
+            ),
+            Self::DeleteActive(id) => write!(
+                formatter,
+                "Task {id} is not archived. A task must be archived before it can be deleted."
+            ),
             Self::ArchiveFileExists { id, filename } => write!(
                 formatter,
                 "Task {id} cannot be archived: the archive already has a file named {filename}."
@@ -114,6 +143,29 @@ impl fmt::Display for TaskStoreError {
 }
 
 impl Error for TaskStoreError {}
+
+fn task_links_target(task: &TaskRecord, target_id: &str, prefix: &str) -> bool {
+    task.dependencies
+        .iter()
+        .any(|dependency| task_ids_equal(dependency, target_id, prefix))
+        || task
+            .references
+            .iter()
+            .any(|reference| is_exact_task_reference(reference, target_id, prefix))
+}
+
+fn is_exact_task_reference(reference: &str, target_id: &str, prefix: &str) -> bool {
+    let reference = reference.trim();
+    let Some((reference_prefix, _)) = reference.split_once('-') else {
+        return false;
+    };
+    let Some((target_prefix, _)) = target_id.trim().split_once('-') else {
+        return false;
+    };
+    !reference_prefix.is_empty()
+        && reference_prefix.eq_ignore_ascii_case(target_prefix)
+        && task_ids_equal(reference, target_id, prefix)
+}
 
 #[derive(Clone, Debug)]
 pub struct TaskStore {
@@ -346,6 +398,249 @@ impl TaskStore {
         Ok(true)
     }
 
+    /// Delete one archived task after removing every local link that would bind to its freed ID.
+    pub fn delete_task(&self, id: &str) -> Result<TaskDeletionResult, TaskStoreError> {
+        if let Some(active) = self.load_task(id)? {
+            return Err(TaskStoreError::DeleteActive(active.task.id));
+        }
+        let Some(target) = self.find_archived_task(id)? else {
+            return Ok(TaskDeletionResult {
+                success: false,
+                cleaned_task_ids: Vec::new(),
+            });
+        };
+
+        for _ in 0..5 {
+            let current = self.find_archived_task(&target.task.id)?;
+            let Some(current) = current else {
+                return Ok(TaskDeletionResult {
+                    success: false,
+                    cleaned_task_ids: Vec::new(),
+                });
+            };
+            let mut candidates = self.vacated_link_records(&current.task.id);
+            candidates.tasks.push(current.clone());
+            candidates
+                .tasks
+                .sort_by_key(|entry| entry.task.id.trim().to_lowercase());
+            candidates
+                .tasks
+                .dedup_by(|left, right| left.path == right.path);
+            let mut task_locks = Vec::new();
+            let mut locked_ids = HashSet::new();
+            for entry in &candidates.tasks {
+                if locked_ids.insert(entry.task.id.trim().to_lowercase()) {
+                    task_locks.push(self.acquire_move_task_lock(entry)?);
+                }
+            }
+            candidates
+                .drafts
+                .sort_by_key(|entry| entry.id.trim().to_lowercase());
+            let mut draft_locks = Vec::new();
+            for draft in &candidates.drafts {
+                draft_locks.push(
+                    self.storage
+                        .acquire_entity_lock("draft", &draft.id, &draft.path)
+                        .map_err(|error| TaskStoreError::TaskLock(error.to_string()))?,
+                );
+            }
+            let create_lock = self
+                .storage
+                .acquire_create_lock()
+                .map_err(|error| TaskStoreError::CreateLock(error.to_string()))?;
+
+            let Some(current) = self.find_archived_task(&target.task.id)? else {
+                return Ok(TaskDeletionResult {
+                    success: false,
+                    cleaned_task_ids: Vec::new(),
+                });
+            };
+            let fresh = self.vacated_link_records(&current.task.id);
+            if fresh.tasks.iter().any(|entry| {
+                !candidates
+                    .tasks
+                    .iter()
+                    .any(|locked| locked.path == entry.path)
+            }) || fresh.drafts.iter().any(|entry| {
+                !candidates
+                    .drafts
+                    .iter()
+                    .any(|locked| locked.path == entry.path)
+            }) {
+                drop(create_lock);
+                drop(draft_locks);
+                drop(task_locks);
+                continue;
+            }
+            let mut children: Vec<String> = self
+                .list_tasks()
+                .into_iter()
+                .chain(self.list_archived_tasks())
+                .map(|entry| entry.task)
+                .chain(fresh.drafts.iter().map(|entry| entry.task.clone()))
+                .filter(|task| {
+                    task.parent_task_id.as_deref().is_some_and(|parent| {
+                        task_ids_equal(parent, &current.task.id, &self.task_prefix)
+                    })
+                })
+                .map(|task| task.id)
+                .collect();
+            children.sort_by(|left, right| compare_task_ids(left, right));
+            children.dedup();
+            if !children.is_empty() {
+                return Err(TaskStoreError::HasSubtasks {
+                    id: current.task.id,
+                    child_ids: children,
+                });
+            }
+
+            for lock in &task_locks {
+                lock.check()
+                    .map_err(|error| TaskStoreError::TaskLock(error.to_string()))?;
+            }
+            for lock in &draft_locks {
+                lock.check()
+                    .map_err(|error| TaskStoreError::TaskLock(error.to_string()))?;
+            }
+            create_lock
+                .check()
+                .map_err(|error| TaskStoreError::CreateLock(error.to_string()))?;
+
+            let mut cleaned_task_ids = Vec::new();
+            let records_to_clean: Vec<(&Path, &str)> = fresh
+                .tasks
+                .iter()
+                .map(|entry| (entry.path.as_path(), entry.task.id.as_str()))
+                .chain(
+                    fresh
+                        .drafts
+                        .iter()
+                        .map(|entry| (entry.path.as_path(), entry.task.id.as_str())),
+                )
+                .collect();
+            for (path, record_id) in records_to_clean {
+                let source = self
+                    .storage
+                    .read(path)
+                    .map_err(|error| TaskStoreError::Storage(error.to_string()))?;
+                let record = records::parse_task(&source)
+                    .map_err(|error| TaskStoreError::Serialization(error.to_string()))?;
+                let dependencies: Vec<_> = record
+                    .dependencies
+                    .iter()
+                    .filter(|dependency| {
+                        !task_ids_equal(dependency, &current.task.id, &self.task_prefix)
+                    })
+                    .cloned()
+                    .collect();
+                let references: Vec<_> = record
+                    .references
+                    .iter()
+                    .filter(|reference| {
+                        !is_exact_task_reference(reference, &current.task.id, &self.task_prefix)
+                    })
+                    .cloned()
+                    .collect();
+                if dependencies == record.dependencies && references == record.references {
+                    continue;
+                }
+                let changes = BTreeMap::from([
+                    (
+                        "dependencies".to_owned(),
+                        Some(serde_json::json!(dependencies)),
+                    ),
+                    ("references".to_owned(), Some(serde_json::json!(references))),
+                    (
+                        "updated_date".to_owned(),
+                        Some(serde_json::json!(utc_timestamp())),
+                    ),
+                ]);
+                let updated = crate::frontmatter::update_frontmatter(&source, &changes)
+                    .map_err(|error| TaskStoreError::Serialization(error.to_string()))?;
+                create_lock
+                    .check()
+                    .map_err(|error| TaskStoreError::CreateLock(error.to_string()))?;
+                self.storage
+                    .write_record(path, &updated, Some(path))
+                    .map_err(|error| TaskStoreError::Storage(error.to_string()))?;
+                cleaned_task_ids.push(record_id.to_owned());
+            }
+            for lock in &task_locks {
+                lock.check()
+                    .map_err(|error| TaskStoreError::TaskLock(error.to_string()))?;
+            }
+            for lock in &draft_locks {
+                lock.check()
+                    .map_err(|error| TaskStoreError::TaskLock(error.to_string()))?;
+            }
+            create_lock
+                .check()
+                .map_err(|error| TaskStoreError::CreateLock(error.to_string()))?;
+            fs::remove_file(&current.path)
+                .map_err(|error| TaskStoreError::Storage(error.to_string()))?;
+            return Ok(TaskDeletionResult {
+                success: true,
+                cleaned_task_ids,
+            });
+        }
+        Err(TaskStoreError::TaskLock(format!(
+            "Could not take a stable set of locks to clean references to {}. Retry once the tasks and drafts referencing it stop changing.",
+            target.task.id
+        )))
+    }
+
+    fn vacated_link_records(&self, target_id: &str) -> VacatedLinkRecords {
+        let tasks: Vec<_> =
+            self.list_tasks()
+                .into_iter()
+                .chain(self.list_archived_tasks())
+                .filter(|entry| !task_ids_equal(&entry.task.id, target_id, &self.task_prefix))
+                .filter(|entry| {
+                    task_links_target(&entry.task, target_id, &self.task_prefix)
+                        || entry.task.parent_task_id.as_deref().is_some_and(|parent| {
+                            task_ids_equal(parent, target_id, &self.task_prefix)
+                        })
+                })
+                .collect();
+        let all_drafts = list_task_file_paths(&self.backlog_directory.join("drafts"), "draft");
+        let mut parsed = Vec::new();
+        let mut counts = HashMap::<String, usize>::new();
+        for path in all_drafts {
+            let Some(filename) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            let Some(file_id) = extract_id_from_filename(filename, "draft") else {
+                continue;
+            };
+            let key = canonical_task_id(&file_id, "draft");
+            *counts.entry(key.clone()).or_default() += 1;
+            let Ok(source) = self.storage.read(&path) else {
+                continue;
+            };
+            let Ok(task) = records::parse_task(&source) else {
+                continue;
+            };
+            if task_ids_equal(&task.id, &file_id, "draft") {
+                parsed.push(DraftFileEntry {
+                    id: key,
+                    task,
+                    path,
+                });
+            }
+        }
+        let drafts = parsed
+            .into_iter()
+            .filter(|entry| {
+                counts.get(&entry.id).copied() == Some(1)
+                    && (task_links_target(&entry.task, target_id, &self.task_prefix)
+                        || entry.task.parent_task_id.as_deref().is_some_and(|parent| {
+                            task_ids_equal(parent, target_id, &self.task_prefix)
+                        }))
+            })
+            .collect();
+        VacatedLinkRecords { tasks, drafts }
+    }
+
     fn acquire_move_task_lock(
         &self,
         task: &TaskFileEntry,
@@ -566,6 +861,35 @@ impl TaskStore {
             path: path.to_owned(),
         }))
     }
+}
+
+fn utc_timestamp() -> String {
+    let seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let days = (seconds / 86_400) as i64;
+    let day_seconds = seconds % 86_400;
+    let shifted = days + 719_468;
+    let era = if shifted >= 0 {
+        shifted
+    } else {
+        shifted - 146_096
+    } / 146_097;
+    let day_of_era = shifted - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let mut year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_part = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_part + 2) / 5 + 1;
+    let month = month_part + if month_part < 10 { 3 } else { -9 };
+    year += i64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:00Z",
+        day_seconds / 3_600,
+        (day_seconds % 3_600) / 60
+    )
 }
 
 fn is_dependency_error(error: &RecordError) -> bool {

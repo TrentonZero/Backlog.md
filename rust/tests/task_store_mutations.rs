@@ -176,6 +176,7 @@ try {
 } catch (error) {
   process.stdout.write(JSON.stringify({ name: error.name, message: error.message }));
 }
+
 "#;
     let bun = std::env::var_os("BACKLOG_REFERENCE_BUN").unwrap_or_else(|| "bun".into());
     let output = Command::new(bun)
@@ -195,6 +196,88 @@ try {
     serde_json::from_slice(&output.stdout).unwrap()
 }
 
+fn reference_delete_task(root: &Path) -> Value {
+    const SCRIPT: &str = r#"
+import { Core } from "./src/core/backlog.ts";
+const core = new Core(process.env.BACKLOG_MUTATION_ROOT);
+function task(id, extra = {}) {
+  return { id, title: `Task ${id}`, status: "To Do", assignee: [], labels: [], dependencies: [], references: [],
+    documentation: [], modifiedFiles: [], rawContent: "Unmanaged notes\n", createdDate: "2025-01-01",
+    description: "", acceptanceCriteriaItems: [], definitionOfDoneItems: [], ...extra };
+}
+
+const linkedPath = await core.filesystem.saveTask(task("TASK-1", { dependencies: ["TASK-03", "TASK-9"], references: ["TASK-3", "https://example.test/TASK-3", "DOC-1"] }));
+await Bun.write(linkedPath, (await Bun.file(linkedPath).text()).replace("status: To Do", "status: To Do\ncustom_metadata: retain"));
+const archivedLinkedPath = await core.filesystem.saveTask(task("TASK-2", { dependencies: ["TASK-3"], references: ["TASK-3"], rawContent: "Archived notes\n" }));
+await core.archiveTask("TASK-2", false, { includeCrossBranch: false });
+const targetPath = await core.filesystem.saveTask(task("TASK-3"));
+const draftPath = await core.filesystem.saveDraft(task("DRAFT-1", { status: "Draft", dependencies: ["TASK-3"], references: ["TASK-03", "https://example.test/TASK-3"], rawContent: "Draft notes\n" }));
+await core.archiveTask("TASK-3", false, { includeCrossBranch: false });
+const archivePath = `${core.filesystem.archiveTasksDir}/${targetPath.split("/").at(-1)}`;
+const result = await core.deleteTask("TASK-3", false, { includeCrossBranch: false });
+const cleanedSource = await Bun.file(`${core.filesystem.tasksDir}/task-1 - Task-TASK-1.md`).text();
+const cleanedArchivedSource = await Bun.file(`${core.filesystem.archiveTasksDir}/${archivedLinkedPath.split("/").at(-1)}`).text();
+const cleanedDraftSource = await Bun.file(draftPath).text();
+const nextId = await core.generateNextId();
+process.stdout.write(JSON.stringify({ result, targetExists: await Bun.file(archivePath).exists(),
+  cleanedSource, cleanedArchivedSource, cleanedDraftSource, nextId }));
+"#;
+    let bun = std::env::var_os("BACKLOG_REFERENCE_BUN").unwrap_or_else(|| "bun".into());
+    let output = Command::new(bun)
+        .args(["--eval", SCRIPT])
+        .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap())
+        .env("BACKLOG_MUTATION_ROOT", root)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("run live TypeScript task deletion");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).unwrap()
+}
+
+fn reference_delete_refusal(root: &Path, mode: &str) -> Value {
+    const SCRIPT: &str = r#"
+import { Core } from "./src/core/backlog.ts";
+const core = new Core(process.env.BACKLOG_MUTATION_ROOT);
+const mode = process.env.BACKLOG_DELETE_MODE;
+const task = (id, extra = {}) => ({ id, title: `Task ${id}`, status: "To Do", assignee: [], labels: [], dependencies: [], references: [],
+  documentation: [], modifiedFiles: [], rawContent: "Body\n", createdDate: "2025-01-01", description: "",
+  acceptanceCriteriaItems: [], definitionOfDoneItems: [], ...extra });
+async function capture(action) { try { return { result: await action() }; }
+  catch (error) { return { name: error.name, message: error.message }; } }
+if (mode === "missing") {
+  process.stdout.write(JSON.stringify(await core.deleteTask("TASK-404", false, { includeCrossBranch: false })));
+} else {
+  const path = await core.filesystem.saveTask(task("TASK-1"));
+  if (mode !== "active") await core.archiveTask("TASK-1", false, { includeCrossBranch: false });
+  if (mode === "ambiguous") await Bun.write(`${core.filesystem.archiveTasksDir}/task-01 - Duplicate.md`, await Bun.file(`${core.filesystem.archiveTasksDir}/${path.split("/").at(-1)}`).text());
+  if (mode === "child-task") await core.filesystem.saveTask(task("TASK-2", { parentTaskId: "TASK-1" }));
+  if (mode === "child-draft") await core.filesystem.saveDraft(task("DRAFT-1", { status: "Draft", parentTaskId: "TASK-1" }));
+  process.stdout.write(JSON.stringify(await capture(() => core.deleteTask("TASK-1", false, { includeCrossBranch: false }))));
+}
+"#;
+    let bun = std::env::var_os("BACKLOG_REFERENCE_BUN").unwrap_or_else(|| "bun".into());
+    let output = Command::new(bun)
+        .args(["--eval", SCRIPT])
+        .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap())
+        .env("BACKLOG_MUTATION_ROOT", root)
+        .env("BACKLOG_DELETE_MODE", mode)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("run live TypeScript task deletion refusal");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).unwrap()
+}
+
 fn initial_task() -> backlog_md::records::TaskRecord {
     let mut task = parse_task(
         "---\nid: TASK-999\ntitle: A created task\nstatus: To Do\ncreated_date: '2025-01-01'\n---\nUnmanaged notes\n",
@@ -202,6 +285,176 @@ fn initial_task() -> backlog_md::records::TaskRecord {
     .unwrap();
     task.description = "Initial description".into();
     task
+}
+
+#[test]
+fn archived_task_deletion_matches_live_typescript_cleanup_and_releases_id() {
+    let fixture = Fixture::new();
+    let typescript_root = fixture.0.join("typescript-delete");
+    let rust_root = fixture.0.join("rust-delete");
+    std::fs::create_dir_all(&typescript_root).unwrap();
+    let tasks = rust_root.join("backlog/tasks");
+    std::fs::create_dir_all(&tasks).unwrap();
+    let linked_path = tasks.join("task-1 - Task-TASK-1.md");
+    let linked_source = "---\nid: TASK-1\ntitle: Linked task\nstatus: To Do\ncreated_date: '2025-01-01'\ndependencies: [TASK-03, TASK-9]\nreferences: [TASK-3, https://example.test/TASK-3, DOC-1]\ncustom_metadata: retain\n---\nUnmanaged notes\n";
+    std::fs::write(&linked_path, linked_source).unwrap();
+    let drafts = rust_root.join("backlog/drafts");
+    std::fs::create_dir_all(&drafts).unwrap();
+    std::fs::write(
+        drafts.join("draft-1 - Draft.md"),
+        "---\nid: DRAFT-1\ntitle: Draft\nstatus: Draft\ncreated_date: '2025-01-01'\ndependencies: [TASK-3]\nreferences: [TASK-03, https://example.test/TASK-3]\ncustom_draft_metadata: retain\n---\nDraft notes\n",
+    ).unwrap();
+    let archived_tasks = rust_root.join("backlog/archive/tasks");
+    std::fs::create_dir_all(&archived_tasks).unwrap();
+    let archived_link = archived_tasks.join("task-2 - Archived-link.md");
+    std::fs::write(
+        &archived_link,
+        "---\nid: TASK-2\ntitle: Archived link\nstatus: To Do\ncreated_date: '2025-01-01'\ndependencies: [TASK-3]\nreferences: [TASK-3]\n---\nArchived notes\n",
+    ).unwrap();
+    let expected = reference_delete_task(&typescript_root);
+    let store = TaskStore::new(&rust_root, "backlog", "task");
+    std::fs::write(
+        tasks.join("task-3 - Task-TASK-3.md"),
+        task_markdown("TASK-3"),
+    )
+    .unwrap();
+    assert!(store.archive_task("TASK-3").unwrap());
+    let deleted = store.delete_task("TASK-3").unwrap();
+    assert!(deleted.success);
+    assert_eq!(
+        deleted.cleaned_task_ids,
+        vec!["TASK-1", "TASK-2", "DRAFT-1"]
+    );
+    assert!(
+        !rust_root
+            .join("backlog/archive/tasks/task-3 - Task-TASK-3.md")
+            .exists()
+    );
+    let cleaned_source = std::fs::read_to_string(linked_path).unwrap();
+    let cleaned = parse_task(&cleaned_source).unwrap();
+    let expected_cleaned = parse_task(expected["cleanedSource"].as_str().unwrap()).unwrap();
+    assert_eq!(cleaned.dependencies, vec!["TASK-9"]);
+    assert_eq!(
+        cleaned.references,
+        vec!["https://example.test/TASK-3", "DOC-1"]
+    );
+    assert!(cleaned_source.contains("custom_metadata: retain"));
+    assert!(cleaned_source.contains("Unmanaged notes"));
+    assert!(cleaned_source.contains("updated_date:"));
+    assert_eq!(cleaned.dependencies, expected_cleaned.dependencies);
+    assert_eq!(cleaned.references, expected_cleaned.references);
+    assert_eq!(cleaned.raw_content, expected_cleaned.raw_content);
+    assert!(
+        expected["cleanedSource"]
+            .as_str()
+            .unwrap()
+            .contains("custom_metadata: retain")
+    );
+    let cleaned_archived_source =
+        std::fs::read_to_string(rust_root.join("backlog/archive/tasks/task-2 - Archived-link.md"))
+            .unwrap();
+    let cleaned_archived = parse_task(&cleaned_archived_source).unwrap();
+    let expected_archived =
+        parse_task(expected["cleanedArchivedSource"].as_str().unwrap()).unwrap();
+    assert!(cleaned_archived.dependencies.is_empty());
+    assert!(cleaned_archived.references.is_empty());
+    assert_eq!(
+        cleaned_archived.dependencies,
+        expected_archived.dependencies
+    );
+    assert_eq!(cleaned_archived.references, expected_archived.references);
+    assert_eq!(cleaned_archived.raw_content, expected_archived.raw_content);
+    let cleaned_draft_source = std::fs::read_to_string(drafts.join("draft-1 - Draft.md")).unwrap();
+    let cleaned_draft = parse_task(&cleaned_draft_source).unwrap();
+    let expected_draft = parse_task(expected["cleanedDraftSource"].as_str().unwrap()).unwrap();
+    assert!(cleaned_draft.dependencies.is_empty());
+    assert_eq!(
+        cleaned_draft.references,
+        vec!["https://example.test/TASK-3"]
+    );
+    assert!(cleaned_draft_source.contains("custom_draft_metadata: retain"));
+    assert!(cleaned_draft_source.contains("Draft notes"));
+    assert_eq!(cleaned_draft.dependencies, expected_draft.dependencies);
+    assert_eq!(cleaned_draft.references, expected_draft.references);
+    assert_eq!(cleaned_draft.raw_content, expected_draft.raw_content);
+    assert_eq!(expected["result"]["success"], true);
+    assert_eq!(
+        expected["result"]["cleanedTaskIds"],
+        json!(["TASK-1", "TASK-2", "DRAFT-1"])
+    );
+    assert_eq!(expected["targetExists"], false);
+    assert_eq!(expected["nextId"], "TASK-3");
+}
+
+#[test]
+fn task_deletion_refusals_match_live_typescript() {
+    let fixture = Fixture::new();
+    for mode in [
+        "missing",
+        "active",
+        "ambiguous",
+        "child-task",
+        "child-draft",
+    ] {
+        let typescript_root = fixture.0.join(format!("typescript-delete-{mode}"));
+        let rust_root = fixture.0.join(format!("rust-delete-{mode}"));
+        std::fs::create_dir_all(&typescript_root).unwrap();
+        let tasks = rust_root.join("backlog/tasks");
+        std::fs::create_dir_all(&tasks).unwrap();
+        let store = TaskStore::new(&rust_root, "backlog", "task");
+        let expected = reference_delete_refusal(&typescript_root, mode);
+        match mode {
+            "missing" => {
+                assert_eq!(expected["success"], false);
+                assert!(!store.delete_task("TASK-404").unwrap().success);
+            }
+            "active" => {
+                std::fs::write(tasks.join("task-1 - Active.md"), task_markdown("TASK-1")).unwrap();
+                let error = store.delete_task("TASK-1").unwrap_err();
+                assert!(matches!(error, TaskStoreError::DeleteActive(_)));
+                assert_eq!(error.to_string(), expected["message"]);
+                assert_eq!(expected["name"], "TaskNotArchivedError");
+            }
+            "ambiguous" => {
+                let archived = rust_root.join("backlog/archive/tasks");
+                std::fs::create_dir_all(&archived).unwrap();
+                std::fs::write(archived.join("task-1 - One.md"), task_markdown("TASK-1")).unwrap();
+                std::fs::write(
+                    archived.join("task-01 - Duplicate.md"),
+                    task_markdown("TASK-01"),
+                )
+                .unwrap();
+                let error = store.delete_task("TASK-1").unwrap_err();
+                assert!(matches!(error, TaskStoreError::Ambiguous(_)));
+                assert_eq!(expected["name"], "AmbiguousTaskIdError");
+            }
+            "child-task" | "child-draft" => {
+                let archived = rust_root.join("backlog/archive/tasks");
+                std::fs::create_dir_all(&archived).unwrap();
+                std::fs::write(archived.join("task-1 - Parent.md"), task_markdown("TASK-1"))
+                    .unwrap();
+                let child = "---\nid: TASK-2\ntitle: Child\nstatus: To Do\ncreated_date: '2025-01-01'\nparent_task_id: TASK-1\n---\nBody\n";
+                if mode == "child-task" {
+                    std::fs::write(tasks.join("task-2 - Child.md"), child).unwrap();
+                } else {
+                    let drafts = rust_root.join("backlog/drafts");
+                    std::fs::create_dir_all(&drafts).unwrap();
+                    std::fs::write(
+                        drafts.join("draft-1 - Child.md"),
+                        child
+                            .replace("TASK-2", "DRAFT-1")
+                            .replace("status: To Do", "status: Draft"),
+                    )
+                    .unwrap();
+                }
+                let error = store.delete_task("TASK-1").unwrap_err();
+                assert!(matches!(error, TaskStoreError::HasSubtasks { .. }));
+                assert_eq!(error.to_string(), expected["message"]);
+                assert_eq!(expected["name"], "TaskHasSubtasksError");
+            }
+            _ => unreachable!(),
+        }
+    }
 }
 
 #[test]
