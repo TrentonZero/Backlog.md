@@ -101,22 +101,7 @@ impl DraftStore {
             .storage
             .acquire_create_lock()
             .map_err(|e| DraftStoreError::Lock(e.to_string()))?;
-        let paths = self.paths();
-        let mut ids: Vec<String> = paths
-            .iter()
-            .filter_map(|path| {
-                path.file_name()?
-                    .to_str()
-                    .and_then(|name| extract_id_from_filename(name, "draft"))
-            })
-            .collect();
-        ids.extend(
-            paths
-                .iter()
-                .filter_map(|path| self.storage.read(path).ok())
-                .filter_map(|source| records::parse_task(&source).ok())
-                .map(|draft| draft.id),
-        );
+        let ids = self.occupied_ids();
         let refs: Vec<_> = ids.iter().map(String::as_str).collect();
         let padding = config
             .zero_padded_ids
@@ -133,6 +118,44 @@ impl DraftStore {
             .write_record(&path, &source, None)
             .map_err(|e| DraftStoreError::Storage(e.to_string()))?;
         self.read_entry(&path)
+    }
+
+    pub fn archive_draft(&self, id: &str) -> Result<bool, DraftStoreError> {
+        let Some(source) = self.resolve_path(id)? else {
+            return Ok(false);
+        };
+        let filename_id = self.filename_id(&source)?;
+        let lock = self
+            .storage
+            .acquire_entity_lock("draft", &filename_id, &source)
+            .map_err(|error| DraftStoreError::Lock(error.to_string()))?;
+        let Some(current) = self.resolve_path(id)? else {
+            return Ok(false);
+        };
+        if current != source {
+            return Err(DraftStoreError::Lock(format!(
+                "Draft {filename_id} was moved or removed by another process."
+            )));
+        }
+        let destination = self
+            .backlog_directory
+            .join("archive/drafts")
+            .join(source.file_name().unwrap_or_default());
+        let contents = self
+            .storage
+            .read(&source)
+            .map_err(|error| DraftStoreError::Storage(error.to_string()))?;
+        lock.check()
+            .map_err(|error| DraftStoreError::Lock(error.to_string()))?;
+        let parent = destination.parent().unwrap_or_else(|| Path::new("."));
+        std::fs::create_dir_all(parent)
+            .and_then(|()| std::fs::write(&destination, contents))
+            .map_err(|error| DraftStoreError::Storage(error.to_string()))?;
+        lock.check()
+            .map_err(|error| DraftStoreError::Lock(error.to_string()))?;
+        std::fs::remove_file(&source)
+            .map_err(|error| DraftStoreError::Storage(error.to_string()))?;
+        Ok(true)
     }
 
     pub fn update_draft(
@@ -207,7 +230,7 @@ impl DraftStore {
         list_task_file_paths(&self.backlog_directory.join("drafts"), "draft")
     }
 
-    fn resolve_path(&self, id: &str) -> Result<Option<PathBuf>, DraftStoreError> {
+    pub(crate) fn resolve_path(&self, id: &str) -> Result<Option<PathBuf>, DraftStoreError> {
         let mut matches: Vec<_> = self
             .paths()
             .into_iter()
@@ -244,19 +267,39 @@ impl DraftStore {
         })
     }
 
-    fn filename_id(&self, path: &Path) -> Result<String, DraftStoreError> {
+    pub(crate) fn filename_id(&self, path: &Path) -> Result<String, DraftStoreError> {
         path.file_name()
             .and_then(|name| name.to_str())
             .and_then(|name| extract_id_from_filename(name, "draft"))
             .ok_or_else(|| DraftStoreError::Serialization("Draft filename has no valid ID".into()))
     }
 
-    fn draft_path(&self, id: &str, title: &str) -> PathBuf {
+    pub(crate) fn draft_path(&self, id: &str, title: &str) -> PathBuf {
         self.backlog_directory.join("drafts").join(format!(
             "{} - {}.md",
             id.to_ascii_lowercase(),
             sanitize_filename(title)
         ))
+    }
+
+    pub(crate) fn occupied_ids(&self) -> Vec<String> {
+        let paths = self.paths();
+        let mut ids: Vec<String> = paths
+            .iter()
+            .filter_map(|path| {
+                path.file_name()?
+                    .to_str()
+                    .and_then(|name| extract_id_from_filename(name, "draft"))
+            })
+            .collect();
+        ids.extend(
+            paths
+                .iter()
+                .filter_map(|path| self.storage.read(path).ok())
+                .filter_map(|source| records::parse_task(&source).ok())
+                .map(|draft| draft.id),
+        );
+        ids
     }
 }
 

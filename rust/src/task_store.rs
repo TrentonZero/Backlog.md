@@ -2,6 +2,7 @@
 
 use crate::{
     config::Config,
+    draft_store::DraftStore,
     git::GitRepository,
     identity::{
         canonical_task_id, extract_id_from_filename, generate_next_id, generate_next_subtask_id,
@@ -48,6 +49,12 @@ struct VacatedLinkRecords {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TaskDeletionResult {
+    pub success: bool,
+    pub cleaned_task_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TaskDemotionResult {
     pub success: bool,
     pub cleaned_task_ids: Vec<String>,
 }
@@ -144,6 +151,10 @@ impl fmt::Display for TaskStoreError {
 
 impl Error for TaskStoreError {}
 
+fn draft_error(error: crate::draft_store::DraftStoreError) -> TaskStoreError {
+    TaskStoreError::Storage(error.to_string())
+}
+
 fn task_links_target(task: &TaskRecord, target_id: &str, prefix: &str) -> bool {
     task.dependencies
         .iter()
@@ -213,20 +224,7 @@ impl TaskStore {
                     TaskStoreError::Storage(error.to_string())
                 }
             })?;
-        let filename_ids = collect_task_file_ids(
-            &self.project_root,
-            &self.backlog_relative_directory,
-            &self.task_prefix,
-        );
-        let mut existing_ids: Vec<String> = self
-            .all_task_paths()
-            .iter()
-            .filter_map(|path| self.storage.read(path).ok())
-            .filter_map(|source| records::parse_task(&source).ok())
-            .map(|record| record.id)
-            .collect();
-        existing_ids.extend(filename_ids);
-        existing_ids.extend(self.branch_task_file_ids(config));
+        let existing_ids = self.occupied_task_ids(config);
         let id_refs: Vec<&str> = existing_ids.iter().map(String::as_str).collect();
         let zero_padding = config
             .zero_padded_ids
@@ -398,6 +396,252 @@ impl TaskStore {
         Ok(true)
     }
 
+    /// Promote a unique draft while holding its file lock and the shared ID allocator lock.
+    pub fn promote_draft(&self, id: &str, config: &Config) -> Result<bool, TaskStoreError> {
+        let drafts = DraftStore::new(&self.project_root, &self.backlog_relative_directory);
+        let Some(source_path) = drafts.resolve_path(id).map_err(draft_error)? else {
+            return Ok(false);
+        };
+        let filename_id = drafts.filename_id(&source_path).map_err(draft_error)?;
+        let draft_lock = self
+            .storage
+            .acquire_entity_lock("draft", &filename_id, &source_path)
+            .map_err(|error| TaskStoreError::TaskLock(error.to_string()))?;
+        let create_lock = self
+            .storage
+            .acquire_create_lock()
+            .map_err(|error| TaskStoreError::CreateLock(error.to_string()))?;
+        let Some(current_path) = drafts.resolve_path(id).map_err(draft_error)? else {
+            return Ok(false);
+        };
+        if current_path != source_path {
+            return Err(TaskStoreError::TaskLock(format!(
+                "Draft {filename_id} was moved or removed by another process."
+            )));
+        }
+        let original = self
+            .storage
+            .read(&source_path)
+            .map_err(|error| TaskStoreError::Storage(error.to_string()))?;
+        let mut task = match records::parse_task(&original) {
+            Ok(task) => task,
+            Err(_) => return Ok(false),
+        };
+        let existing_ids = self.occupied_task_ids(config);
+        let existing_refs: Vec<_> = existing_ids.iter().map(String::as_str).collect();
+        let padding = config
+            .zero_padded_ids
+            .filter(|width| width.is_finite() && *width > 0.0)
+            .map(|width| width as usize);
+        task.id = if let Some(parent) = task.parent_task_id.as_deref() {
+            generate_next_subtask_id(&existing_refs, parent, &self.task_prefix, padding)
+        } else {
+            generate_next_id(&existing_refs, &self.task_prefix, padding)
+        };
+        if task.status.trim().is_empty() || task.status.eq_ignore_ascii_case("draft") {
+            task.status = config
+                .default_status
+                .clone()
+                .unwrap_or_else(|| "To Do".into());
+        }
+        let target = self.task_path(&task.id, &task.title);
+        let source = serialization::serialize_task(&task, &original)
+            .map_err(|error| TaskStoreError::Serialization(error.to_string()))?;
+        draft_lock
+            .check()
+            .map_err(|error| TaskStoreError::TaskLock(error.to_string()))?;
+        create_lock
+            .check()
+            .map_err(|error| TaskStoreError::CreateLock(error.to_string()))?;
+        self.storage
+            .write_record(&target, &source, None)
+            .map_err(|error| TaskStoreError::Storage(error.to_string()))?;
+        if let Err(error) = draft_lock.check().and_then(|()| create_lock.check()) {
+            let _ = fs::remove_file(&target);
+            return Err(TaskStoreError::TaskLock(error.to_string()));
+        }
+        if let Err(error) = fs::remove_file(&source_path) {
+            let _ = fs::remove_file(&target);
+            return Err(TaskStoreError::Storage(error.to_string()));
+        }
+        Ok(true)
+    }
+
+    /// Demote an active task and clean other records before releasing its task ID.
+    pub fn demote_task(
+        &self,
+        id: &str,
+        config: &Config,
+    ) -> Result<TaskDemotionResult, TaskStoreError> {
+        let Some(target) = self.load_task(id)? else {
+            if self.find_archived_task(id)?.is_some() {
+                return Err(TaskStoreError::Archived(id.to_owned()));
+            }
+            return Ok(TaskDemotionResult {
+                success: false,
+                cleaned_task_ids: Vec::new(),
+            });
+        };
+        for _ in 0..5 {
+            let Some(current) = self.load_task(&target.task.id)? else {
+                return Ok(TaskDemotionResult {
+                    success: false,
+                    cleaned_task_ids: Vec::new(),
+                });
+            };
+            let mut candidates = self.vacated_link_records(&current.task.id);
+            candidates.tasks.push(current.clone());
+            candidates
+                .tasks
+                .sort_by_key(|entry| entry.task.id.trim().to_lowercase());
+            candidates
+                .tasks
+                .dedup_by(|left, right| left.path == right.path);
+            candidates
+                .drafts
+                .sort_by_key(|entry| entry.id.trim().to_lowercase());
+            let mut task_locks = Vec::new();
+            let mut locked_ids = HashSet::new();
+            for entry in &candidates.tasks {
+                if locked_ids.insert(entry.task.id.trim().to_lowercase()) {
+                    task_locks.push(self.acquire_move_task_lock(entry)?);
+                }
+            }
+            let mut draft_locks = Vec::new();
+            for draft in &candidates.drafts {
+                draft_locks.push(
+                    self.storage
+                        .acquire_entity_lock("draft", &draft.id, &draft.path)
+                        .map_err(|error| TaskStoreError::TaskLock(error.to_string()))?,
+                );
+            }
+            let create_lock = self
+                .storage
+                .acquire_create_lock()
+                .map_err(|error| TaskStoreError::CreateLock(error.to_string()))?;
+            let Some(current_after_lock) = self.load_task(&target.task.id)? else {
+                if self.find_archived_task(&target.task.id)?.is_some() {
+                    return Err(TaskStoreError::Archived(target.task.id.clone()));
+                }
+                return Ok(TaskDemotionResult {
+                    success: false,
+                    cleaned_task_ids: Vec::new(),
+                });
+            };
+            if current_after_lock.path != current.path {
+                return Err(TaskStoreError::TaskLock(format!(
+                    "Task {} was moved or removed by another process.",
+                    current.task.id
+                )));
+            }
+            let fresh = self.vacated_link_records(&current.task.id);
+            if fresh.tasks.iter().any(|entry| {
+                !candidates
+                    .tasks
+                    .iter()
+                    .any(|locked| locked.path == entry.path)
+            }) || fresh.drafts.iter().any(|entry| {
+                !candidates
+                    .drafts
+                    .iter()
+                    .any(|locked| locked.path == entry.path)
+            }) {
+                drop(create_lock);
+                drop(draft_locks);
+                drop(task_locks);
+                continue;
+            }
+            let original = self
+                .storage
+                .read(&current.path)
+                .map_err(|error| TaskStoreError::Storage(error.to_string()))?;
+            let mut demoted = records::parse_task(&original)
+                .map_err(|error| TaskStoreError::Serialization(error.to_string()))?;
+            let draft_store = DraftStore::new(&self.project_root, &self.backlog_relative_directory);
+            let occupied = draft_store.occupied_ids();
+            let occupied_refs: Vec<_> = occupied.iter().map(String::as_str).collect();
+            let padding = config
+                .zero_padded_ids
+                .filter(|width| width.is_finite() && *width > 0.0)
+                .map(|width| width as usize);
+            demoted.id = generate_next_id(&occupied_refs, "draft", padding);
+            demoted.dependencies.retain(|dependency| {
+                !task_ids_equal(dependency, &current.task.id, &self.task_prefix)
+            });
+            demoted.references.retain(|reference| {
+                !is_exact_task_reference(reference, &current.task.id, &self.task_prefix)
+            });
+            let target_draft = draft_store.draft_path(&demoted.id, &demoted.title);
+            let contents = serialization::serialize_task(&demoted, &original)
+                .map_err(|error| TaskStoreError::Serialization(error.to_string()))?;
+            for lock in &task_locks {
+                lock.check()
+                    .map_err(|error| TaskStoreError::TaskLock(error.to_string()))?;
+            }
+            for lock in &draft_locks {
+                lock.check()
+                    .map_err(|error| TaskStoreError::TaskLock(error.to_string()))?;
+            }
+            create_lock
+                .check()
+                .map_err(|error| TaskStoreError::CreateLock(error.to_string()))?;
+            self.storage
+                .write_record(&target_draft, &contents, None)
+                .map_err(|error| TaskStoreError::Storage(error.to_string()))?;
+            let lock_check = task_locks
+                .iter()
+                .try_for_each(|lock| lock.check())
+                .and_then(|()| draft_locks.iter().try_for_each(|lock| lock.check()))
+                .and_then(|()| create_lock.check());
+            if let Err(error) = lock_check {
+                let _ = fs::remove_file(&target_draft);
+                return Err(TaskStoreError::TaskLock(error.to_string()));
+            }
+            if let Err(error) = fs::remove_file(&current.path) {
+                let _ = fs::remove_file(&target_draft);
+                return Err(TaskStoreError::Storage(error.to_string()));
+            }
+            let mut cleaned_task_ids = Vec::new();
+            let records_to_clean: Vec<(&Path, &str)> = fresh
+                .tasks
+                .iter()
+                .map(|entry| (entry.path.as_path(), entry.task.id.as_str()))
+                .chain(
+                    fresh
+                        .drafts
+                        .iter()
+                        .map(|entry| (entry.path.as_path(), entry.task.id.as_str())),
+                )
+                .collect();
+            for (path, record_id) in records_to_clean {
+                if let Some(cleaned_id) =
+                    self.clean_vacated_links(path, record_id, &current.task.id, &create_lock)?
+                {
+                    cleaned_task_ids.push(cleaned_id);
+                }
+            }
+            for lock in &task_locks {
+                lock.check()
+                    .map_err(|error| TaskStoreError::TaskLock(error.to_string()))?;
+            }
+            for lock in &draft_locks {
+                lock.check()
+                    .map_err(|error| TaskStoreError::TaskLock(error.to_string()))?;
+            }
+            create_lock
+                .check()
+                .map_err(|error| TaskStoreError::CreateLock(error.to_string()))?;
+            return Ok(TaskDemotionResult {
+                success: true,
+                cleaned_task_ids,
+            });
+        }
+        Err(TaskStoreError::TaskLock(format!(
+            "Could not take a stable set of locks to clean references to {}. Retry once the tasks and drafts referencing it stop changing.",
+            target.task.id
+        )))
+    }
+
     /// Delete one archived task after removing every local link that would bind to its freed ID.
     pub fn delete_task(&self, id: &str) -> Result<TaskDeletionResult, TaskStoreError> {
         if let Some(active) = self.load_task(id)? {
@@ -519,51 +763,11 @@ impl TaskStore {
                 )
                 .collect();
             for (path, record_id) in records_to_clean {
-                let source = self
-                    .storage
-                    .read(path)
-                    .map_err(|error| TaskStoreError::Storage(error.to_string()))?;
-                let record = records::parse_task(&source)
-                    .map_err(|error| TaskStoreError::Serialization(error.to_string()))?;
-                let dependencies: Vec<_> = record
-                    .dependencies
-                    .iter()
-                    .filter(|dependency| {
-                        !task_ids_equal(dependency, &current.task.id, &self.task_prefix)
-                    })
-                    .cloned()
-                    .collect();
-                let references: Vec<_> = record
-                    .references
-                    .iter()
-                    .filter(|reference| {
-                        !is_exact_task_reference(reference, &current.task.id, &self.task_prefix)
-                    })
-                    .cloned()
-                    .collect();
-                if dependencies == record.dependencies && references == record.references {
-                    continue;
+                if let Some(cleaned_id) =
+                    self.clean_vacated_links(path, record_id, &current.task.id, &create_lock)?
+                {
+                    cleaned_task_ids.push(cleaned_id);
                 }
-                let changes = BTreeMap::from([
-                    (
-                        "dependencies".to_owned(),
-                        Some(serde_json::json!(dependencies)),
-                    ),
-                    ("references".to_owned(), Some(serde_json::json!(references))),
-                    (
-                        "updated_date".to_owned(),
-                        Some(serde_json::json!(utc_timestamp())),
-                    ),
-                ]);
-                let updated = crate::frontmatter::update_frontmatter(&source, &changes)
-                    .map_err(|error| TaskStoreError::Serialization(error.to_string()))?;
-                create_lock
-                    .check()
-                    .map_err(|error| TaskStoreError::CreateLock(error.to_string()))?;
-                self.storage
-                    .write_record(path, &updated, Some(path))
-                    .map_err(|error| TaskStoreError::Storage(error.to_string()))?;
-                cleaned_task_ids.push(record_id.to_owned());
             }
             for lock in &task_locks {
                 lock.check()
@@ -623,6 +827,56 @@ impl TaskStore {
         })
         .collect();
         VacatedLinkRecords { tasks, drafts }
+    }
+
+    fn clean_vacated_links(
+        &self,
+        path: &Path,
+        record_id: &str,
+        target_id: &str,
+        create_lock: &crate::storage::FileLock,
+    ) -> Result<Option<String>, TaskStoreError> {
+        let source = self
+            .storage
+            .read(path)
+            .map_err(|error| TaskStoreError::Storage(error.to_string()))?;
+        let record = records::parse_task(&source)
+            .map_err(|error| TaskStoreError::Serialization(error.to_string()))?;
+        let dependencies: Vec<_> = record
+            .dependencies
+            .iter()
+            .filter(|dependency| !task_ids_equal(dependency, target_id, &self.task_prefix))
+            .cloned()
+            .collect();
+        let references: Vec<_> = record
+            .references
+            .iter()
+            .filter(|reference| !is_exact_task_reference(reference, target_id, &self.task_prefix))
+            .cloned()
+            .collect();
+        if dependencies == record.dependencies && references == record.references {
+            return Ok(None);
+        }
+        let changes = BTreeMap::from([
+            (
+                "dependencies".to_owned(),
+                Some(serde_json::json!(dependencies)),
+            ),
+            ("references".to_owned(), Some(serde_json::json!(references))),
+            (
+                "updated_date".to_owned(),
+                Some(serde_json::json!(utc_timestamp())),
+            ),
+        ]);
+        let updated = crate::frontmatter::update_frontmatter(&source, &changes)
+            .map_err(|error| TaskStoreError::Serialization(error.to_string()))?;
+        create_lock
+            .check()
+            .map_err(|error| TaskStoreError::CreateLock(error.to_string()))?;
+        self.storage
+            .write_record(path, &updated, Some(path))
+            .map_err(|error| TaskStoreError::Storage(error.to_string()))?;
+        Ok(Some(record_id.to_owned()))
     }
 
     fn acquire_move_task_lock(
@@ -802,6 +1056,23 @@ impl TaskStore {
             paths.extend(list_task_file_paths(&directory, &self.task_prefix));
         }
         paths
+    }
+
+    fn occupied_task_ids(&self, config: &Config) -> Vec<String> {
+        let mut ids: Vec<String> = self
+            .all_task_paths()
+            .iter()
+            .filter_map(|path| self.storage.read(path).ok())
+            .filter_map(|source| records::parse_task(&source).ok())
+            .map(|record| record.id)
+            .collect();
+        ids.extend(collect_task_file_ids(
+            &self.project_root,
+            &self.backlog_relative_directory,
+            &self.task_prefix,
+        ));
+        ids.extend(self.branch_task_file_ids(config));
+        ids
     }
 
     fn archived_task_directories(&self) -> Vec<PathBuf> {
