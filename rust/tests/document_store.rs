@@ -76,7 +76,7 @@ fn lists_and_resolves_documents_like_typescript() {
     );
     fixture.file("README.md", "---\nid: doc-3\ntitle: README\n---\nIgnore\n");
     fixture.file("broken.md", "---\nid: [\n---\n");
-    let store = DocumentStore::new(&fixture.0, "backlog");
+    let store = DocumentStore::new(&fixture.0, "backlog", "task");
     let documents = store.list_documents();
     assert_eq!(
         documents
@@ -149,7 +149,7 @@ fn duplicate_identity_fails_and_create_update_preserve_source() {
         "project_name: test\nzero_padded_ids: 3\n",
     )
     .unwrap();
-    let store = DocumentStore::new(&fixture.0, "backlog");
+    let store = DocumentStore::new(&fixture.0, "backlog", "task");
     let config = Config {
         zero_padded_ids: Some(3.0),
         ..Config::default()
@@ -248,7 +248,7 @@ fn skips_directory_aliases_that_point_inside_the_document_tree() {
         fixture.0.join("backlog/docs/a-alias"),
     )
     .unwrap();
-    let store = DocumentStore::new(&fixture.0, "backlog");
+    let store = DocumentStore::new(&fixture.0, "backlog", "task");
     let rust_path = store.list_documents()[0]
         .path
         .strip_prefix(fixture.0.join("backlog/docs"))
@@ -288,7 +288,7 @@ fn updates_refuse_archived_documents_and_active_archive_duplicates() {
         "doc-9 - Archived.md",
         "---\nid: doc-9\ntitle: Archived\n---\nBody\n",
     );
-    let store = DocumentStore::new(&fixture.0, "backlog");
+    let store = DocumentStore::new(&fixture.0, "backlog", "task");
     let error = store
         .update_document(document("doc-9", "Changed", "Body\n"))
         .unwrap_err();

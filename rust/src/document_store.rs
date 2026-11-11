@@ -2,6 +2,7 @@
 
 use crate::{
     config::Config,
+    draft_store::DraftStore,
     git::GitRepository,
     identity::{
         AmbiguousIdError, HasEntityId, document_id_key, entity_ids_equal, find_document_by_id,
@@ -10,6 +11,7 @@ use crate::{
     records::{self, DocumentRecord},
     serialization,
     storage::Storage,
+    task_store::TaskStore,
 };
 use std::{
     collections::{HashSet, VecDeque},
@@ -26,6 +28,12 @@ pub struct DocumentFileEntry {
     pub archived: bool,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DocumentChangeResult {
+    pub id: String,
+    pub listed_as_documentation_by: Vec<String>,
+}
+
 impl HasEntityId for DocumentFileEntry {
     fn entity_id(&self) -> &str {
         &self.document.id
@@ -37,6 +45,23 @@ pub enum DocumentStoreError {
     Ambiguous(AmbiguousIdError),
     Archived(String),
     NotFound(String),
+    NotArchived {
+        id: String,
+        operation: &'static str,
+    },
+    ArchiveFileExists {
+        id: String,
+        path: String,
+    },
+    RestoreFileExists {
+        id: String,
+        path: String,
+    },
+    RemoveRefused {
+        id: String,
+        path: String,
+        reason: String,
+    },
     Lock(String),
     Storage(String),
     Serialization(String),
@@ -52,6 +77,33 @@ impl fmt::Display for DocumentStoreError {
                 "Document {id} is archived. Archived documents are read-only. Restore it first: backlog doc restore {id}"
             ),
             Self::NotFound(id) => write!(formatter, "Document not found: {id}"),
+            Self::NotArchived {
+                id,
+                operation: "restore",
+            } => write!(
+                formatter,
+                "Document {id} is not archived, so there is nothing to restore."
+            ),
+            Self::NotArchived {
+                id,
+                operation: "delete",
+            } => write!(
+                formatter,
+                "Document {id} is not archived. A document must be archived before it can be deleted."
+            ),
+            Self::NotArchived { id, .. } => write!(formatter, "Document {id} is not archived."),
+            Self::ArchiveFileExists { id, path } => write!(
+                formatter,
+                "Document {id} cannot be archived: the archive already has a file at {path}."
+            ),
+            Self::RestoreFileExists { id, path } => write!(
+                formatter,
+                "Document {id} cannot be restored: the docs folder already has a file at {path}."
+            ),
+            Self::RemoveRefused { id, path, reason } => write!(
+                formatter,
+                "The file of document {id} was not removed: {path} {reason}"
+            ),
             Self::Lock(message)
             | Self::Storage(message)
             | Self::Serialization(message)
@@ -65,6 +117,7 @@ impl Error for DocumentStoreError {}
 #[derive(Clone, Debug)]
 pub struct DocumentStore {
     project_root: PathBuf,
+    task_prefix: String,
     docs_directory: PathBuf,
     archive_directory: PathBuf,
     storage: Storage,
@@ -74,6 +127,7 @@ impl DocumentStore {
     pub fn new(
         project_root: impl Into<PathBuf>,
         backlog_relative_directory: impl Into<PathBuf>,
+        task_prefix: impl Into<String>,
     ) -> Self {
         let project_root = project_root.into();
         let backlog_directory = project_root.join(backlog_relative_directory.into());
@@ -83,6 +137,7 @@ impl DocumentStore {
         Self {
             storage: Storage::new(&backlog_directory, common_git_dir),
             project_root,
+            task_prefix: task_prefix.into(),
             docs_directory,
             archive_directory,
         }
@@ -204,6 +259,225 @@ impl DocumentStore {
             .write_record(&destination, &source, Some(&current.path))
             .map_err(|error| DocumentStoreError::Storage(error.to_string()))?;
         self.read_entry(destination)
+    }
+
+    /// Move one active document into its archive folder without rewriting its Markdown.
+    pub fn archive_document(
+        &self,
+        id: &str,
+    ) -> Result<Option<DocumentChangeResult>, DocumentStoreError> {
+        self.move_document(id, true)
+    }
+
+    /// Restore one archived document to its original relative path without rewriting its Markdown.
+    pub fn restore_document(
+        &self,
+        id: &str,
+    ) -> Result<Option<DocumentChangeResult>, DocumentStoreError> {
+        self.move_document(id, false)
+    }
+
+    /// Permanently remove one archived document and report records that still name either path.
+    pub fn delete_document(
+        &self,
+        id: &str,
+    ) -> Result<Option<DocumentChangeResult>, DocumentStoreError> {
+        let Some(target) = self.resolve_document(id)? else {
+            return Ok(None);
+        };
+        if !target.archived {
+            return Err(DocumentStoreError::NotArchived {
+                id: target.document.id,
+                operation: "delete",
+            });
+        }
+        let lock_id = document_id_key(&target.document.id)
+            .unwrap_or_else(|| normalize_document_id(&target.document.id));
+        let lock = self
+            .storage
+            .acquire_entity_lock("document", &lock_id, &target.path)
+            .map_err(|error| DocumentStoreError::Lock(error.to_string()))?;
+        let Some(current) = self.resolve_document(id)? else {
+            return Ok(None);
+        };
+        if current.path != target.path {
+            return Err(DocumentStoreError::Lock(format!(
+                "Document {} was moved or removed by another process.",
+                target.document.id
+            )));
+        }
+        if !current.archived {
+            return Err(DocumentStoreError::NotArchived {
+                id: current.document.id,
+                operation: "delete",
+            });
+        }
+
+        let project_path = self.project_path(&current.path);
+        let active_path = self.active_path(&current.path)?;
+        let active_project_path = self.project_path(&active_path);
+        let listed_as_documentation_by =
+            self.list_documentation_references(&[project_path.clone(), active_project_path]);
+        let source =
+            self.storage
+                .read(&current.path)
+                .map_err(|_| DocumentStoreError::RemoveRefused {
+                    id: current.document.id.clone(),
+                    path: project_path.clone(),
+                    reason: "cannot be read as a document.".into(),
+                })?;
+        let stored =
+            records::parse_document(&source).map_err(|_| DocumentStoreError::RemoveRefused {
+                id: current.document.id.clone(),
+                path: project_path.clone(),
+                reason: "cannot be read as a document.".into(),
+            })?;
+        if !entity_ids_equal("doc", &stored.id, &current.document.id) {
+            return Err(DocumentStoreError::RemoveRefused {
+                id: current.document.id,
+                path: project_path,
+                reason: format!("is the file of {}.", stored.id),
+            });
+        }
+        lock.check()
+            .map_err(|error| DocumentStoreError::Lock(error.to_string()))?;
+        fs::remove_file(&current.path)
+            .map_err(|error| DocumentStoreError::Storage(error.to_string()))?;
+        Ok(Some(DocumentChangeResult {
+            id: current.document.id,
+            listed_as_documentation_by,
+        }))
+    }
+
+    fn move_document(
+        &self,
+        id: &str,
+        archive: bool,
+    ) -> Result<Option<DocumentChangeResult>, DocumentStoreError> {
+        let Some(target) = self.resolve_document(id)? else {
+            return Ok(None);
+        };
+        if target.archived == archive {
+            if archive {
+                return Err(DocumentStoreError::Archived(target.document.id));
+            }
+            return Err(DocumentStoreError::NotArchived {
+                id: target.document.id,
+                operation: "restore",
+            });
+        }
+        let lock_id = document_id_key(&target.document.id)
+            .unwrap_or_else(|| normalize_document_id(&target.document.id));
+        let lock = self
+            .storage
+            .acquire_entity_lock("document", &lock_id, &target.path)
+            .map_err(|error| DocumentStoreError::Lock(error.to_string()))?;
+        let Some(current) = self.resolve_document(id)? else {
+            return Ok(None);
+        };
+        if current.path != target.path {
+            return Err(DocumentStoreError::Lock(format!(
+                "Document {} was moved or removed by another process.",
+                target.document.id
+            )));
+        }
+        if current.archived == archive {
+            if archive {
+                return Err(DocumentStoreError::Archived(current.document.id));
+            }
+            return Err(DocumentStoreError::NotArchived {
+                id: current.document.id,
+                operation: "restore",
+            });
+        }
+        let relative = current
+            .path
+            .strip_prefix(if archive {
+                &self.docs_directory
+            } else {
+                &self.archive_directory
+            })
+            .map_err(|error| DocumentStoreError::Storage(error.to_string()))?;
+        let destination = if archive {
+            self.archive_directory.join(relative)
+        } else {
+            self.docs_directory.join(relative)
+        };
+        let current_project_path = self.project_path(&current.path);
+        let destination_project_path = self.project_path(&destination);
+        let listed_as_documentation_by =
+            self.list_documentation_references(&[current_project_path]);
+        lock.check()
+            .map_err(|error| DocumentStoreError::Lock(error.to_string()))?;
+        self.storage
+            .move_record(&current.path, &destination)
+            .map_err(|error| {
+                if error.kind() == std::io::ErrorKind::AlreadyExists {
+                    if archive {
+                        DocumentStoreError::ArchiveFileExists {
+                            id: current.document.id.clone(),
+                            path: destination_project_path,
+                        }
+                    } else {
+                        DocumentStoreError::RestoreFileExists {
+                            id: current.document.id.clone(),
+                            path: destination_project_path,
+                        }
+                    }
+                } else {
+                    DocumentStoreError::Storage(error.to_string())
+                }
+            })?;
+        Ok(Some(DocumentChangeResult {
+            id: current.document.id,
+            listed_as_documentation_by,
+        }))
+    }
+
+    fn active_path(&self, archived_path: &Path) -> Result<PathBuf, DocumentStoreError> {
+        archived_path
+            .strip_prefix(&self.archive_directory)
+            .map(|relative| self.docs_directory.join(relative))
+            .map_err(|error| DocumentStoreError::Storage(error.to_string()))
+    }
+
+    fn list_documentation_references(&self, paths: &[String]) -> Vec<String> {
+        let backlog_relative_directory = self
+            .docs_directory
+            .strip_prefix(&self.project_root)
+            .ok()
+            .and_then(Path::parent)
+            .unwrap_or_else(|| Path::new("backlog"));
+        let task_store = TaskStore::new(
+            &self.project_root,
+            backlog_relative_directory,
+            &self.task_prefix,
+        );
+        let draft_store = DraftStore::new(&self.project_root, backlog_relative_directory);
+        let matches = |task: &crate::records::TaskRecord| {
+            task.documentation.iter().any(|entry| {
+                let trimmed = entry.trim();
+                let path = trimmed.strip_prefix("./").unwrap_or(trimmed);
+                paths.iter().any(|project_path| {
+                    path == project_path || path.starts_with(&format!("{project_path}#"))
+                })
+            })
+        };
+        let mut seen = HashSet::new();
+        task_store
+            .list_tasks()
+            .into_iter()
+            .chain(task_store.list_archived_tasks())
+            .map(|entry| entry.task)
+            .chain(
+                draft_store
+                    .list_drafts()
+                    .into_iter()
+                    .map(|entry| entry.task),
+            )
+            .filter(|task| matches(task) && seen.insert(task.id.clone()))
+            .map(|task| task.id)
+            .collect()
     }
 
     fn read_entry(&self, path: PathBuf) -> Result<DocumentFileEntry, DocumentStoreError> {

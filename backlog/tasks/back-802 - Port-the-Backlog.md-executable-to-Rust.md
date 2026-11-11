@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@codex'
 created_date: '2026-11-07T21:53:00Z'
-updated_date: '2026-11-09T13:23:00Z'
+updated_date: '2026-11-11T21:53:00Z'
 labels: []
 dependencies:
   - BACK-801
@@ -85,4 +85,6 @@ Completed stages: BACK-802.1 managed sections, BACK-802.2 Rust CI, BACK-802.3 co
 BACK-802.17 added archived-only Rust task deletion. It refuses active/ambiguous tasks and tasks with direct children across active tasks, archived tasks, or drafts; cleans dependency and exact task-reference links under entity and shared create locks before removing the archive file. Live TypeScript comparisons cover cleanup, preservation, refusal cases, and ID reuse. Rust full checks and scoped Bun deletion/reference tests passed; reviews found no remaining blockers. Groma was unavailable in the workspace.
 
 BACK-802.18 added local draft listing, lookup, create and update in Rust with live TypeScript comparisons. BACK-802.19 added draft archive, promotion and demotion with identity-safe locks and lifecycle comparisons. BACK-802.20 added local document listing, lookup, padded creation and source-preserving updates, including identity ambiguity, archive read-only, and TypeScript traversal/order parity. All 20 currently tracked subtasks are complete; the overall executable migration remains In Progress. Remaining initiative gates include the complete Rust CLI, browser HTTP/WebSocket server, MCP adapter, TUI, and native/npm/Nix distribution and cutover validation.
+
+BACK-802.21 completed: Rust document archive, restore, and delete now preserve source bytes and relative paths, enforce locks and identity checks, refuse destination collisions, unlink symlinks safely, report documentation backlinks, and preserve ID reservation rules. Full Rust fmt/Clippy/tests and 96 focused Bun tests passed; review found no blockers. Groma was unavailable. The overall migration remains In Progress; CLI, browser HTTP/WebSocket server, MCP, TUI, distribution and final cutover gates remain.
 <!-- SECTION:NOTES:END -->
