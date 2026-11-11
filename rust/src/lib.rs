@@ -1,5 +1,6 @@
 //! Internal Rust components for the staged Backlog.md executable migration.
 pub mod config;
+pub mod decision_store;
 pub mod discovery;
 pub mod document_store;
 pub mod draft_store;
