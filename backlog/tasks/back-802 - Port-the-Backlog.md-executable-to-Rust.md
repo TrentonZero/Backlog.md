@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@codex'
 created_date: '2026-11-07T21:53:00Z'
-updated_date: '2026-11-11T22:20:00Z'
+updated_date: '2026-11-11T22:28:00Z'
 labels: []
 dependencies:
   - BACK-801
@@ -91,4 +91,6 @@ BACK-802.21 completed: Rust document archive, restore, and delete now preserve s
 BACK-802.22 completed: added Rust DecisionStore listing, active/archive identity lookup, DEC allocation/creation, and locked partial updates with source-preserving managed-section serialization, validation, supersession, and TypeScript parity. Full Rust checks/tests and 46 focused Bun decision tests passed; independent reviews found no blockers after fixes. Overall migration remains In Progress; remaining application domains, canonical CLI, browser HTTP/WebSocket server, MCP, TUI, and distribution/cutover gates are outstanding.
 
 BACK-802.23 completed: Rust DecisionStore now archives, restores, and deletes decisions with shared locking, identity rechecks, no-overwrite moves, byte preservation, symlink-safe unlinking, task/draft backlinks, and branch-aware ID reservation. Full Rust fmt/Clippy and 150 tests passed; focused Bun lifecycle comparisons passed 122 tests. The full migration remains In Progress; next are remaining domain stores and then CLI/server/adapters/distribution gates. Groma was unavailable.
+
+BACK-802.24 completed: added Rust milestone active/archive listing, TypeScript-priority identifier resolution, and locked creation with ID allocation across archived records, source-compatible titles/descriptions, due dates, and file serialization. Full Rust fmt/Clippy and 152 tests passed; 13 focused Bun tests passed; reviews found no remaining blockers. Remaining overall migration surfaces are milestone lifecycle/update, remaining CLI/domain behaviors, HTTP/WebSocket browser server, MCP, TUI, packaging, and cutover.
 <!-- SECTION:NOTES:END -->
