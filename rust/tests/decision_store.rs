@@ -44,7 +44,7 @@ fn refuses_ambiguous_and_archived_updates_and_uses_the_shared_entity_lock() {
     fixture.decision("archive/decisions", "decision-1 - Existing.md", source);
     reference_fixture.decision("decisions", "decision-1 - Existing.md", source);
     reference_fixture.decision("archive/decisions", "decision-1 - Existing.md", source);
-    let store = DecisionStore::new(&fixture.0, "backlog");
+    let store = DecisionStore::new(&fixture.0, "backlog", "task");
     let ambiguous = store.get_decision("1").unwrap_err().to_string();
     assert!(ambiguous.contains("Decision ID decision-1 is ambiguous; 2 files match:"));
 
@@ -108,7 +108,7 @@ process.stdout.write(JSON.stringify({ambiguous, archived}));
 fn decision_input_validation_matches_typescript_and_does_not_create_partial_files() {
     let fixture = Fixture::new();
     let reference_fixture = Fixture::new();
-    let store = DecisionStore::new(&fixture.0, "backlog");
+    let store = DecisionStore::new(&fixture.0, "backlog", "task");
     let config = Config::default();
     let empty_title = store
         .create_decision(
@@ -162,7 +162,7 @@ fn update_lock_contention_matches_the_live_typescript_refusal() {
     let source = "---\nid: decision-1\ntitle: Existing\ndate: 2025-01-01\nstatus: proposed\n---\n## Decision\nChoice\n";
     fixture.decision("decisions", "decision-1 - Existing.md", source);
     reference_fixture.decision("decisions", "decision-1 - Existing.md", source);
-    let store = DecisionStore::new(&fixture.0, "backlog");
+    let store = DecisionStore::new(&fixture.0, "backlog", "task");
     let target = fixture.0.join("backlog/decisions/decision-1 - Existing.md");
     let blocker = Storage::new(fixture.0.join("backlog"), None)
         .acquire_entity_lock("decision", "decision-1", &target)
@@ -197,7 +197,7 @@ process.stdout.write(JSON.stringify({refused, source:await Bun.file(root+"/backl
 #[test]
 fn concurrent_decision_creates_claim_distinct_ids_without_overwriting() {
     let fixture = Fixture::new();
-    let store = Arc::new(DecisionStore::new(&fixture.0, "backlog"));
+    let store = Arc::new(DecisionStore::new(&fixture.0, "backlog", "task"));
     let config = Config::default();
     let threads: Vec<_> = ["First", "Second"]
         .into_iter()
@@ -286,7 +286,7 @@ fn lists_active_and_archived_decisions_and_resolves_identity_like_typescript() {
     );
     fixture.decision("decisions", "decision-4 - Broken.md", "---\nid: [\n---\n");
 
-    let store = DecisionStore::new(&fixture.0, "backlog");
+    let store = DecisionStore::new(&fixture.0, "backlog", "task");
     let active = store.list_decisions();
     let archived = store.list_archived_decisions();
     assert_eq!(
@@ -325,7 +325,7 @@ fn creates_and_partially_updates_decisions_without_losing_source_content() {
     let existing_source = "---\nid: decision-1\ntitle: Existing\ndate: 2025-01-01\nstatus: proposed\ncustom: retained\n---\nUnmanaged note\n\n## Context\nOld context\n\n## Decision\nOld choice\n";
     fixture.decision("decisions", "decision-1 - Existing.md", existing_source);
     reference_fixture.decision("decisions", "decision-1 - Existing.md", existing_source);
-    let store = DecisionStore::new(&fixture.0, "backlog");
+    let store = DecisionStore::new(&fixture.0, "backlog", "task");
     let config = Config::default();
     let created = store
         .create_decision(

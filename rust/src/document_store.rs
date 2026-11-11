@@ -2,7 +2,7 @@
 
 use crate::{
     config::Config,
-    draft_store::DraftStore,
+    content_references::list_documentation_references,
     git::GitRepository,
     identity::{
         AmbiguousIdError, HasEntityId, document_id_key, entity_ids_equal, find_document_by_id,
@@ -11,7 +11,6 @@ use crate::{
     records::{self, DocumentRecord},
     serialization,
     storage::Storage,
-    task_store::TaskStore,
 };
 use std::{
     collections::{HashSet, VecDeque},
@@ -316,8 +315,12 @@ impl DocumentStore {
         let project_path = self.project_path(&current.path);
         let active_path = self.active_path(&current.path)?;
         let active_project_path = self.project_path(&active_path);
-        let listed_as_documentation_by =
-            self.list_documentation_references(&[project_path.clone(), active_project_path]);
+        let listed_as_documentation_by = list_documentation_references(
+            &self.project_root,
+            self.docs_directory.parent().unwrap_or(&self.docs_directory),
+            &self.task_prefix,
+            &[project_path.clone(), active_project_path],
+        );
         let source =
             self.storage
                 .read(&current.path)
@@ -405,8 +408,12 @@ impl DocumentStore {
         };
         let current_project_path = self.project_path(&current.path);
         let destination_project_path = self.project_path(&destination);
-        let listed_as_documentation_by =
-            self.list_documentation_references(&[current_project_path]);
+        let listed_as_documentation_by = list_documentation_references(
+            &self.project_root,
+            self.docs_directory.parent().unwrap_or(&self.docs_directory),
+            &self.task_prefix,
+            &[current_project_path],
+        );
         lock.check()
             .map_err(|error| DocumentStoreError::Lock(error.to_string()))?;
         self.storage
@@ -439,45 +446,6 @@ impl DocumentStore {
             .strip_prefix(&self.archive_directory)
             .map(|relative| self.docs_directory.join(relative))
             .map_err(|error| DocumentStoreError::Storage(error.to_string()))
-    }
-
-    fn list_documentation_references(&self, paths: &[String]) -> Vec<String> {
-        let backlog_relative_directory = self
-            .docs_directory
-            .strip_prefix(&self.project_root)
-            .ok()
-            .and_then(Path::parent)
-            .unwrap_or_else(|| Path::new("backlog"));
-        let task_store = TaskStore::new(
-            &self.project_root,
-            backlog_relative_directory,
-            &self.task_prefix,
-        );
-        let draft_store = DraftStore::new(&self.project_root, backlog_relative_directory);
-        let matches = |task: &crate::records::TaskRecord| {
-            task.documentation.iter().any(|entry| {
-                let trimmed = entry.trim();
-                let path = trimmed.strip_prefix("./").unwrap_or(trimmed);
-                paths.iter().any(|project_path| {
-                    path == project_path || path.starts_with(&format!("{project_path}#"))
-                })
-            })
-        };
-        let mut seen = HashSet::new();
-        task_store
-            .list_tasks()
-            .into_iter()
-            .chain(task_store.list_archived_tasks())
-            .map(|entry| entry.task)
-            .chain(
-                draft_store
-                    .list_drafts()
-                    .into_iter()
-                    .map(|entry| entry.task),
-            )
-            .filter(|task| matches(task) && seen.insert(task.id.clone()))
-            .map(|task| task.id)
-            .collect()
     }
 
     fn read_entry(&self, path: PathBuf) -> Result<DocumentFileEntry, DocumentStoreError> {

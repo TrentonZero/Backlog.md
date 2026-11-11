@@ -2,6 +2,7 @@
 
 use crate::{
     config::Config,
+    content_references::list_documentation_references,
     git::GitRepository,
     identity::{
         AmbiguousIdError, HasEntityId, decision_id_key, entity_ids_equal, extract_id_from_filename,
@@ -15,7 +16,7 @@ use crate::{
 };
 use std::{
     error::Error,
-    fmt,
+    fmt, fs,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -25,6 +26,12 @@ pub struct DecisionFileEntry {
     pub decision: DecisionRecord,
     pub path: PathBuf,
     pub archived: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DecisionChangeResult {
+    pub id: String,
+    pub listed_as_documentation_by: Vec<String>,
 }
 
 impl HasEntityId for DecisionFileEntry {
@@ -60,6 +67,23 @@ pub enum DecisionStoreError {
     Ambiguous(AmbiguousIdError),
     Archived(String),
     NotFound(String),
+    NotArchived {
+        id: String,
+        operation: &'static str,
+    },
+    ArchiveFileExists {
+        id: String,
+        path: String,
+    },
+    RestoreFileExists {
+        id: String,
+        path: String,
+    },
+    RemoveRefused {
+        id: String,
+        path: String,
+        reason: String,
+    },
     Refused(String),
     Lock(String),
     Storage(String),
@@ -75,6 +99,33 @@ impl fmt::Display for DecisionStoreError {
                 "Decision {id} is archived. Archived decisions are read-only. Restore it first: backlog decision restore {id}"
             ),
             Self::NotFound(id) => write!(formatter, "Decision not found: {id}"),
+            Self::NotArchived {
+                id,
+                operation: "restore",
+            } => write!(
+                formatter,
+                "Decision {id} is not archived, so there is nothing to restore."
+            ),
+            Self::NotArchived {
+                id,
+                operation: "delete",
+            } => write!(
+                formatter,
+                "Decision {id} is not archived. A decision must be archived before it can be deleted."
+            ),
+            Self::NotArchived { id, .. } => write!(formatter, "Decision {id} is not archived."),
+            Self::ArchiveFileExists { id, path } => write!(
+                formatter,
+                "Decision {id} cannot be archived: the archive already has a file at {path}."
+            ),
+            Self::RestoreFileExists { id, path } => write!(
+                formatter,
+                "Decision {id} cannot be restored: the decisions folder already has a file at {path}."
+            ),
+            Self::RemoveRefused { id, path, reason } => write!(
+                formatter,
+                "The file of decision {id} was not removed: {path} {reason}"
+            ),
             Self::Refused(message)
             | Self::Lock(message)
             | Self::Storage(message)
@@ -89,6 +140,7 @@ impl Error for DecisionStoreError {}
 pub struct DecisionStore {
     project_root: PathBuf,
     backlog_directory: PathBuf,
+    task_prefix: String,
     decisions_directory: PathBuf,
     archive_directory: PathBuf,
     storage: Storage,
@@ -98,6 +150,7 @@ impl DecisionStore {
     pub fn new(
         project_root: impl Into<PathBuf>,
         backlog_relative_directory: impl Into<PathBuf>,
+        task_prefix: impl Into<String>,
     ) -> Self {
         let project_root = project_root.into();
         let backlog_directory = project_root.join(backlog_relative_directory.into());
@@ -108,6 +161,7 @@ impl DecisionStore {
             archive_directory: backlog_directory.join("archive/decisions"),
             project_root,
             backlog_directory,
+            task_prefix: task_prefix.into(),
         }
     }
 
@@ -121,6 +175,191 @@ impl DecisionStore {
 
     pub fn get_decision(&self, id: &str) -> Result<Option<DecisionFileEntry>, DecisionStoreError> {
         self.resolve_decision(id)
+    }
+
+    pub fn archive_decision(
+        &self,
+        id: &str,
+    ) -> Result<Option<DecisionChangeResult>, DecisionStoreError> {
+        self.move_decision(id, true)
+    }
+
+    pub fn restore_decision(
+        &self,
+        id: &str,
+    ) -> Result<Option<DecisionChangeResult>, DecisionStoreError> {
+        self.move_decision(id, false)
+    }
+
+    pub fn delete_decision(
+        &self,
+        id: &str,
+    ) -> Result<Option<DecisionChangeResult>, DecisionStoreError> {
+        let Some(target) = self.resolve_decision(id)? else {
+            return Ok(None);
+        };
+        if !target.archived {
+            return Err(DecisionStoreError::NotArchived {
+                id: target.decision.id,
+                operation: "delete",
+            });
+        }
+        let lock_id = decision_id_key(&target.decision.id)
+            .unwrap_or_else(|| normalize_entity_id("decision", &target.decision.id));
+        let lock = self
+            .storage
+            .acquire_entity_lock("decision", &lock_id, &target.path)
+            .map_err(|error| DecisionStoreError::Lock(error.to_string()))?;
+        let Some(current) = self.resolve_decision(id)? else {
+            return Ok(None);
+        };
+        if current.path != target.path {
+            return Err(DecisionStoreError::Lock(format!(
+                "Decision {} was moved or removed by another process.",
+                target.decision.id
+            )));
+        }
+        if !current.archived {
+            return Err(DecisionStoreError::NotArchived {
+                id: current.decision.id,
+                operation: "delete",
+            });
+        }
+        let archive_project_path = self.project_path(&current.path);
+        let active_path = self.active_path(&current.path)?;
+        let active_project_path = self.project_path(&active_path);
+        let listed_as_documentation_by = list_documentation_references(
+            &self.project_root,
+            &self.backlog_directory,
+            &self.task_prefix,
+            &[archive_project_path.clone(), active_project_path],
+        );
+        let source =
+            self.storage
+                .read(&current.path)
+                .map_err(|_| DecisionStoreError::RemoveRefused {
+                    id: current.decision.id.clone(),
+                    path: archive_project_path.clone(),
+                    reason: "cannot be read as a decision.".into(),
+                })?;
+        let stored =
+            records::parse_decision(&source).map_err(|_| DecisionStoreError::RemoveRefused {
+                id: current.decision.id.clone(),
+                path: archive_project_path.clone(),
+                reason: "cannot be read as a decision.".into(),
+            })?;
+        if !entity_ids_equal("decision", &stored.id, &current.decision.id) {
+            return Err(DecisionStoreError::RemoveRefused {
+                id: current.decision.id,
+                path: archive_project_path,
+                reason: format!("is the file of {}.", stored.id),
+            });
+        }
+        lock.check()
+            .map_err(|error| DecisionStoreError::Lock(error.to_string()))?;
+        fs::remove_file(&current.path)
+            .map_err(|error| DecisionStoreError::Storage(error.to_string()))?;
+        Ok(Some(DecisionChangeResult {
+            id: current.decision.id,
+            listed_as_documentation_by,
+        }))
+    }
+
+    fn move_decision(
+        &self,
+        id: &str,
+        archive: bool,
+    ) -> Result<Option<DecisionChangeResult>, DecisionStoreError> {
+        let Some(target) = self.resolve_decision(id)? else {
+            return Ok(None);
+        };
+        if target.archived == archive {
+            if archive {
+                return Err(DecisionStoreError::Archived(target.decision.id));
+            }
+            return Err(DecisionStoreError::NotArchived {
+                id: target.decision.id,
+                operation: "restore",
+            });
+        }
+        let lock_id = decision_id_key(&target.decision.id)
+            .unwrap_or_else(|| normalize_entity_id("decision", &target.decision.id));
+        let lock = self
+            .storage
+            .acquire_entity_lock("decision", &lock_id, &target.path)
+            .map_err(|error| DecisionStoreError::Lock(error.to_string()))?;
+        let Some(current) = self.resolve_decision(id)? else {
+            return Ok(None);
+        };
+        if current.path != target.path {
+            return Err(DecisionStoreError::Lock(format!(
+                "Decision {} was moved or removed by another process.",
+                target.decision.id
+            )));
+        }
+        if current.archived == archive {
+            if archive {
+                return Err(DecisionStoreError::Archived(current.decision.id));
+            }
+            return Err(DecisionStoreError::NotArchived {
+                id: current.decision.id,
+                operation: "restore",
+            });
+        }
+        let source_directory = if archive {
+            &self.decisions_directory
+        } else {
+            &self.archive_directory
+        };
+        let relative = current
+            .path
+            .strip_prefix(source_directory)
+            .map_err(|error| DecisionStoreError::Storage(error.to_string()))?;
+        let destination = if archive {
+            self.archive_directory.join(relative)
+        } else {
+            self.decisions_directory.join(relative)
+        };
+        let source_project_path = self.project_path(&current.path);
+        let destination_project_path = self.project_path(&destination);
+        let listed_as_documentation_by = list_documentation_references(
+            &self.project_root,
+            &self.backlog_directory,
+            &self.task_prefix,
+            &[source_project_path],
+        );
+        lock.check()
+            .map_err(|error| DecisionStoreError::Lock(error.to_string()))?;
+        self.storage
+            .move_record(&current.path, &destination)
+            .map_err(|error| {
+                if error.kind() == std::io::ErrorKind::AlreadyExists {
+                    if archive {
+                        DecisionStoreError::ArchiveFileExists {
+                            id: current.decision.id.clone(),
+                            path: destination_project_path,
+                        }
+                    } else {
+                        DecisionStoreError::RestoreFileExists {
+                            id: current.decision.id.clone(),
+                            path: destination_project_path,
+                        }
+                    }
+                } else {
+                    DecisionStoreError::Storage(error.to_string())
+                }
+            })?;
+        Ok(Some(DecisionChangeResult {
+            id: current.decision.id,
+            listed_as_documentation_by,
+        }))
+    }
+
+    fn active_path(&self, archived_path: &Path) -> Result<PathBuf, DecisionStoreError> {
+        archived_path
+            .strip_prefix(&self.archive_directory)
+            .map(|relative| self.decisions_directory.join(relative))
+            .map_err(|error| DecisionStoreError::Storage(error.to_string()))
     }
 
     pub fn create_decision(
