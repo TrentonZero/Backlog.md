@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@codex'
 created_date: '2026-11-07T21:53:00Z'
-updated_date: '2026-11-11T23:18:00Z'
+updated_date: '2026-11-11T23:28:00Z'
 labels: []
 dependencies:
   - BACK-801
@@ -103,4 +103,6 @@ BACK-802.27 completed: TaskStore creation and dependency edits now validate acti
 BACK-802.28 completed: added Rust status-driven promotion and demotion operations that validate dependencies against newly allocated identities before writes or link cleanup, preserve unresolved legacy references, and retain existing direct lifecycle semantics. Full Rust fmt/Clippy and 166 tests passed; 24 focused Bun dependency tests passed; simplicity and complexity reviews found no blockers. Remaining initiative work includes the rest of Rust application/query behavior, canonical CLI, HTTP/WebSocket browser server, MCP, TUI, native/npm/Nix distribution, and final compatibility/cutover gates. Groma remains unavailable.
 
 BACK-802.29 completed: added the Rust dependency graph read model with live TypeScript parity for canonical aliases, active/draft/archive records, missing and ambiguous IDs, cycles, diamonds, archived completion, separate dependency/dependent depths, and deterministic ordering. The model accepts externally carried ambiguous IDs and is read-only. Full Rust fmt/Clippy and 168 tests passed; 37 focused Bun graph/CLI tests passed; required reviews found no blockers. The overall migration remains active with application queries, canonical CLI, browser HTTP/WebSocket server, MCP, TUI, distribution, and cutover gates still outstanding. Groma is unavailable.
+
+BACK-802.30 completed: added Rust readiness queries over the active+archived task corpus with draft exclusion, default/custom terminal statuses, blockers, missing/ambiguous IDs, and not-actionable archived/terminal targets. Dependency graph and readiness now share TaskRecordIndex for canonical identity, ambiguity, and completion rules. Full Rust fmt/Clippy and 170 tests passed; 24 focused Bun readiness/surface tests passed; required reviews found no blockers. Remaining application/query, canonical CLI, browser HTTP/WebSocket server, MCP, TUI, distribution, and compatibility/cutover work remains. Groma is unavailable.
 <!-- SECTION:NOTES:END -->

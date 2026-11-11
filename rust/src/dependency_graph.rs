@@ -1,6 +1,11 @@
 //! Read-time dependency relationships shared by task detail surfaces.
 
-use crate::{identity::canonical_task_id, records::TaskRecord, task_store::compare_task_ids};
+use crate::{
+    identity::canonical_task_id,
+    records::TaskRecord,
+    task_record_index::{TaskRecordIndex, TaskRecordLookup},
+    task_store::compare_task_ids,
+};
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -54,29 +59,11 @@ pub fn build_dependency_graph(
     ambiguous_ids: &[String],
     prefix: &str,
 ) -> DependencyGraph {
-    let records: Vec<&TaskRecord> = tasks.iter().chain(archived_tasks).collect();
-    let mut by_identity: HashMap<String, Vec<&TaskRecord>> = HashMap::new();
-    for record in &records {
-        by_identity
-            .entry(canonical_task_id(&record.id, prefix))
-            .or_default()
-            .push(record);
-    }
-    let ambiguous_ids: HashSet<_> = ambiguous_ids
-        .iter()
-        .map(|id| canonical_task_id(id, prefix))
-        .collect();
-
+    let index = TaskRecordIndex::new(tasks, archived_tasks, statuses, ambiguous_ids, prefix);
     let root_key = canonical_task_id(&root.id, prefix);
-    let root_record = if ambiguous_ids.contains(&root_key) {
-        root
-    } else {
-        by_identity
-            .get(&root_key)
-            .filter(|matches| matches.len() == 1)
-            .and_then(|matches| matches.first())
-            .copied()
-            .unwrap_or(root)
+    let root_record = match index.lookup(&root.id) {
+        TaskRecordLookup::Unique(record) => record.task,
+        TaskRecordLookup::Missing | TaskRecordLookup::Ambiguous => root,
     };
     let mut nodes = HashMap::new();
     nodes.insert(
@@ -86,16 +73,16 @@ pub fn build_dependency_graph(
             title: Some(root.title.clone()),
             status: Some(root.status.clone()),
             state: DependencyNodeState::Resolved,
-            completed: is_finished(&root_record.status, statuses),
+            completed: index.is_finished(&root_record.status),
             dependency_depth: Some(0),
             dependent_depth: Some(0),
         },
     );
 
     let mut declarers: HashMap<String, BTreeSet<String>> = HashMap::new();
-    for record in &records {
-        let from = canonical_task_id(&record.id, prefix);
-        for dependency in &record.dependencies {
+    for record in index.records() {
+        let from = canonical_task_id(&record.task.id, prefix);
+        for dependency in &record.task.dependencies {
             declarers
                 .entry(canonical_task_id(dependency, prefix))
                 .or_default()
@@ -114,23 +101,14 @@ pub fn build_dependency_graph(
         }
         let dependencies = if current == root_key {
             root.dependencies.as_slice()
+        } else if let TaskRecordLookup::Unique(record) = index.lookup(&current) {
+            record.task.dependencies.as_slice()
         } else {
-            by_identity
-                .get(&current)
-                .filter(|matches| matches.len() == 1)
-                .and_then(|matches| matches.first())
-                .map_or(&[][..], |record| record.dependencies.as_slice())
+            &[]
         };
         for reference in dependencies {
             let next = canonical_task_id(reference, prefix);
-            ensure_node(
-                &next,
-                reference,
-                &by_identity,
-                &ambiguous_ids,
-                statuses,
-                &mut nodes,
-            );
+            ensure_node(&next, reference, &index, &mut nodes);
             edges.insert((current.clone(), next.clone()));
             let node = nodes.get_mut(&next).expect("dependency node was inserted");
             if node.dependency_depth.is_none() {
@@ -154,14 +132,7 @@ pub fn build_dependency_graph(
         let mut dependents: Vec<_> = dependents.iter().cloned().collect();
         dependents.sort_by(|left, right| compare_task_ids(left, right));
         for dependent in dependents {
-            ensure_node(
-                &dependent,
-                &dependent,
-                &by_identity,
-                &ambiguous_ids,
-                statuses,
-                &mut nodes,
-            );
+            ensure_node(&dependent, &dependent, &index, &mut nodes);
             edges.insert((dependent.clone(), current.clone()));
             let node = nodes
                 .get_mut(&dependent)
@@ -209,9 +180,7 @@ pub fn build_dependency_graph(
 fn ensure_node(
     key: &str,
     reference: &str,
-    by_identity: &HashMap<String, Vec<&TaskRecord>>,
-    ambiguous_ids: &HashSet<String>,
-    statuses: &[String],
+    index: &TaskRecordIndex<'_>,
     nodes: &mut HashMap<String, DependencyGraphNode>,
 ) {
     if nodes.contains_key(key) {
@@ -230,8 +199,18 @@ fn ensure_node(
         dependency_depth: None,
         dependent_depth: None,
     };
-    let node = if ambiguous_ids.contains(key) {
-        DependencyGraphNode {
+    let node = match index.lookup(key) {
+        TaskRecordLookup::Missing => unresolved(),
+        TaskRecordLookup::Unique(record) => DependencyGraphNode {
+            id: record.task.id.clone(),
+            title: Some(record.task.title.clone()),
+            status: Some(record.task.status.clone()),
+            state: DependencyNodeState::Resolved,
+            completed: index.is_finished(&record.task.status),
+            dependency_depth: None,
+            dependent_depth: None,
+        },
+        TaskRecordLookup::Ambiguous => DependencyGraphNode {
             id: key.to_owned(),
             title: None,
             status: None,
@@ -239,41 +218,7 @@ fn ensure_node(
             completed: false,
             dependency_depth: None,
             dependent_depth: None,
-        }
-    } else {
-        match by_identity.get(key).map(Vec::as_slice) {
-            None | Some([]) => unresolved(),
-            Some([record]) => DependencyGraphNode {
-                id: record.id.clone(),
-                title: Some(record.title.clone()),
-                status: Some(record.status.clone()),
-                state: DependencyNodeState::Resolved,
-                completed: is_finished(&record.status, statuses),
-                dependency_depth: None,
-                dependent_depth: None,
-            },
-            Some(_) => DependencyGraphNode {
-                id: key.to_owned(),
-                title: None,
-                status: None,
-                state: DependencyNodeState::Ambiguous,
-                completed: false,
-                dependency_depth: None,
-                dependent_depth: None,
-            },
-        }
+        },
     };
     nodes.insert(key.to_owned(), node);
-}
-
-fn is_finished(status: &str, statuses: &[String]) -> bool {
-    let terminal = if statuses.is_empty() {
-        Some("Done")
-    } else {
-        statuses
-            .last()
-            .map(String::as_str)
-            .filter(|status| !status.trim().is_empty())
-    };
-    terminal.is_some_and(|terminal| status.trim().eq_ignore_ascii_case(terminal.trim()))
 }
