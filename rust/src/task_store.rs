@@ -1307,9 +1307,31 @@ pub(crate) fn compare_task_ids(left: &str, right: &str) -> Ordering {
             return order;
         }
     }
+    // Numeric locale comparison treats leading-zero and case-only spellings as equal; stable
+    // sorting then retains their incoming order instead of imposing a lexical tie-breaker.
+    if sortable_id_text(left) == sortable_id_text(right) {
+        return Ordering::Equal;
+    }
     left.to_lowercase()
         .cmp(&right.to_lowercase())
         .then_with(|| left.cmp(right))
+}
+
+fn sortable_id_text(id: &str) -> String {
+    let mut result = String::new();
+    let mut characters = id.chars().peekable();
+    while let Some(character) = characters.next() {
+        if character.is_ascii_digit() {
+            let mut digits = String::from(character);
+            while characters.peek().is_some_and(char::is_ascii_digit) {
+                digits.push(characters.next().unwrap());
+            }
+            result.push_str(&canonical_decimal(&digits));
+        } else {
+            result.extend(character.to_lowercase());
+        }
+    }
+    result
 }
 
 fn sortable_id_parts(id: &str) -> Vec<String> {

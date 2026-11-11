@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@codex'
 created_date: '2026-11-07T21:53:00Z'
-updated_date: '2026-11-11T23:36:00Z'
+updated_date: '2026-11-11T23:49:00Z'
 labels: []
 dependencies:
   - BACK-801
@@ -109,4 +109,6 @@ BACK-802.30 completed: added Rust readiness queries over the active+archived tas
 BACK-802.31 Port task detail assembly to Rust is complete. Added TaskDetail and build_task_detail using the same active/archived corpus, statuses, ambiguous IDs, and prefix for both derived queries. Verified TypeScript parity across resolved, blocked, missing, ambiguous, archived, and terminal cases; serialization excludes derived fields. Rust suite: 172 passed; fmt and Clippy clean; focused TypeScript suite: 24 passed. Cold simplicity and complexity reviews had no blocking findings. Groma is unavailable (command not found).
 
 BACK-802.32 Port task list readiness projection to Rust is complete. Added TaskListItem and with_readiness with one ReadinessGraph over the full active+archived corpus, independent of display filters. TypeScript parity verifies blocked hidden dependencies, ready, missing, ambiguous, archived, and terminal rows; serialization keeps readiness out of Markdown. Rust suite: 173 passed; fmt and Clippy clean; focused TypeScript suite: 24 passed. Reviews found no blockers. Groma remains unavailable.
+
+BACK-802.33 Port task list ordering to Rust is complete. Added canonical default/id/ordinal/priority sorts and status grouping, including configured priority normalization/fallback and stable numeric-ID tie behavior. Legacy NaN ordinal comparisons use a stable insertion path. Live TypeScript parity covers sort modes, grouping, custom priorities, leading-zero equivalent IDs, and mixed NaN/finite ordinals. Rust suite: 174 passed; fmt and Clippy clean; relevant TypeScript suites: 38 passed. Reviews found no blockers. Groma remains unavailable.
 <!-- SECTION:NOTES:END -->
