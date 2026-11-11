@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@codex'
 created_date: '2026-11-07T21:53:00Z'
-updated_date: '2026-11-11T22:49:00Z'
+updated_date: '2026-11-11T22:59:00Z'
 labels: []
 dependencies:
   - BACK-801
@@ -97,4 +97,6 @@ BACK-802.24 completed: added Rust milestone active/archive listing, TypeScript-p
 BACK-802.25 completed: Rust milestone rename/archive now preserve default description and due-date semantics, reject rename and archive destination collisions without replacing either source, and return refusal results on storage failures. Full Rust fmt/Clippy and 154 tests passed; focused Bun suites passed 13 tests; independent reviews found no remaining blockers. Remaining Rust milestone deletion, remaining CLI/domain behavior, HTTP/WebSocket server, MCP, TUI, packaging, and cutover.
 
 BACK-802.26 completed: added Rust milestone removal coordination for keep/clear/reassign, target validation, task assignment updates, milestone archival, and task rollback on archive refusal. Full Rust fmt/Clippy and 158 tests passed; 13 focused Bun tests passed; independent reviews cleared their original findings. Remaining Rust milestone create/rename/archive/removal orchestration into CLI, remaining domain/CLI parity, HTTP/WebSocket browser server, MCP, TUI, packaging and final cutover.
+
+BACK-802.27 completed: TaskStore creation and dependency edits now validate active, archived, and draft dependencies in Rust, canonicalize and deduplicate aliases, reject invalid/self/cyclic references before persistence, and preserve source on refused edits. Live TypeScript parity tests cover successful create/edit Markdown dependencies and refusal messages. Full Rust fmt/Clippy and 163 tests passed; 24 focused Bun dependency tests passed; required simplicity and complexity reviews found no blockers. Remaining migration work: task dependency operations outside these TaskStore paths, canonical Rust CLI/application commands, HTTP/WebSocket browser server, MCP, TUI, native/npm/Nix distribution, and final compatibility/cutover gates. Groma is unavailable in the workspace.
 <!-- SECTION:NOTES:END -->

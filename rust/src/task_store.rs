@@ -68,7 +68,7 @@ pub struct AmbiguousTaskIdError {
 }
 
 impl AmbiguousTaskIdError {
-    fn new(id: &str, mut candidates: Vec<String>) -> Self {
+    pub(crate) fn new(id: &str, mut candidates: Vec<String>) -> Self {
         candidates.sort();
         let canonical_id = canonical_task_id(id, "task");
         let message = format!(
@@ -236,6 +236,16 @@ impl TaskStore {
             generate_next_id(&id_refs, &self.task_prefix, zero_padding)
         };
 
+        let draft_store = DraftStore::new(&self.project_root, &self.backlog_relative_directory);
+        let dependencies = task.dependencies.clone();
+        task.dependencies = crate::dependencies::validate_task_dependencies(
+            self,
+            &draft_store,
+            &dependencies,
+            &task,
+            &self.task_prefix,
+        )?;
+
         let path = self.task_path(&task.id, &task.title);
         let source = serialization::serialize_task(&task, "")
             .map_err(|error| TaskStoreError::Serialization(error.to_string()))?;
@@ -308,6 +318,17 @@ impl TaskStore {
         ) && task_ids_equal(existing_parent, parent, &self.task_prefix)
         {
             *parent = existing_parent.clone();
+        }
+        if task.dependencies != existing_task.dependencies {
+            let draft_store = DraftStore::new(&self.project_root, &self.backlog_relative_directory);
+            let dependencies = task.dependencies.clone();
+            task.dependencies = crate::dependencies::validate_task_dependencies(
+                self,
+                &draft_store,
+                &dependencies,
+                &task,
+                &self.task_prefix,
+            )?;
         }
         let source = serialization::serialize_task(&task, &original)
             .map_err(|error| TaskStoreError::Serialization(error.to_string()))?;

@@ -2,6 +2,7 @@
 pub mod config;
 mod content_references;
 pub mod decision_store;
+pub mod dependencies;
 pub mod discovery;
 pub mod document_store;
 pub mod draft_store;
