@@ -8,6 +8,7 @@ pub mod draft_store;
 pub mod frontmatter;
 pub mod git;
 pub mod identity;
+pub mod milestone_service;
 pub mod milestone_store;
 pub mod records;
 pub mod sections;
