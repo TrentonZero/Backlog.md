@@ -15,6 +15,27 @@ pub(crate) fn validate_task_dependencies(
     target: &TaskRecord,
     prefix: &str,
 ) -> Result<Vec<String>, TaskStoreError> {
+    validate_dependencies(tasks, drafts, dependencies, target, prefix, false)
+}
+
+pub(crate) fn validate_transition_dependencies(
+    tasks: &TaskStore,
+    drafts: &DraftStore,
+    dependencies: &[String],
+    target: &TaskRecord,
+    prefix: &str,
+) -> Result<(), TaskStoreError> {
+    validate_dependencies(tasks, drafts, dependencies, target, prefix, true).map(|_| ())
+}
+
+fn validate_dependencies(
+    tasks: &TaskStore,
+    drafts: &DraftStore,
+    dependencies: &[String],
+    target: &TaskRecord,
+    prefix: &str,
+    allow_missing: bool,
+) -> Result<Vec<String>, TaskStoreError> {
     if dependencies.is_empty() {
         return Ok(Vec::new());
     }
@@ -66,7 +87,9 @@ pub(crate) fn validate_task_dependencies(
             if task_ids_equal(dependency, &target.id, prefix) {
                 return Err(self_dependency(&target.id, dependency));
             }
-            invalid.push(dependency.clone());
+            if !allow_missing {
+                invalid.push(dependency.clone());
+            }
             continue;
         };
         if task_ids_equal(&record.id, &target.id, prefix) {

@@ -419,6 +419,25 @@ impl TaskStore {
 
     /// Promote a unique draft while holding its file lock and the shared ID allocator lock.
     pub fn promote_draft(&self, id: &str, config: &Config) -> Result<bool, TaskStoreError> {
+        self.promote_draft_inner(id, config, None)
+    }
+
+    /// Promote a draft for a status edit, validating links against its newly allocated task ID.
+    pub fn promote_draft_for_status_update(
+        &self,
+        id: &str,
+        status: &str,
+        config: &Config,
+    ) -> Result<bool, TaskStoreError> {
+        self.promote_draft_inner(id, config, Some(status))
+    }
+
+    fn promote_draft_inner(
+        &self,
+        id: &str,
+        config: &Config,
+        status_override: Option<&str>,
+    ) -> Result<bool, TaskStoreError> {
         let drafts = DraftStore::new(&self.project_root, &self.backlog_relative_directory);
         let Some(source_path) = drafts.resolve_path(id).map_err(draft_error)? else {
             return Ok(false);
@@ -459,11 +478,22 @@ impl TaskStore {
         } else {
             generate_next_id(&existing_refs, &self.task_prefix, padding)
         };
-        if task.status.trim().is_empty() || task.status.eq_ignore_ascii_case("draft") {
+        if let Some(status) = status_override {
+            task.status = status.to_owned();
+        } else if task.status.trim().is_empty() || task.status.eq_ignore_ascii_case("draft") {
             task.status = config
                 .default_status
                 .clone()
                 .unwrap_or_else(|| "To Do".into());
+        }
+        if status_override.is_some() {
+            crate::dependencies::validate_transition_dependencies(
+                self,
+                &drafts,
+                &task.dependencies,
+                &task,
+                &self.task_prefix,
+            )?;
         }
         let target = self.task_path(&task.id, &task.title);
         let source = serialization::serialize_task(&task, &original)
@@ -493,6 +523,24 @@ impl TaskStore {
         &self,
         id: &str,
         config: &Config,
+    ) -> Result<TaskDemotionResult, TaskStoreError> {
+        self.demote_task_inner(id, config, false)
+    }
+
+    /// Demote a task for a status edit, validating links against its new draft identity.
+    pub fn demote_task_for_status_update(
+        &self,
+        id: &str,
+        config: &Config,
+    ) -> Result<TaskDemotionResult, TaskStoreError> {
+        self.demote_task_inner(id, config, true)
+    }
+
+    fn demote_task_inner(
+        &self,
+        id: &str,
+        config: &Config,
+        validate_transition_dependencies: bool,
     ) -> Result<TaskDemotionResult, TaskStoreError> {
         let Some(target) = self.load_task(id)? else {
             if self.find_archived_task(id)?.is_some() {
@@ -586,12 +634,24 @@ impl TaskStore {
                 .filter(|width| width.is_finite() && *width > 0.0)
                 .map(|width| width as usize);
             demoted.id = generate_next_id(&occupied_refs, "draft", padding);
+            if validate_transition_dependencies {
+                demoted.status = "Draft".into();
+            }
             demoted.dependencies.retain(|dependency| {
                 !task_ids_equal(dependency, &current.task.id, &self.task_prefix)
             });
             demoted.references.retain(|reference| {
                 !is_exact_task_reference(reference, &current.task.id, &self.task_prefix)
             });
+            if validate_transition_dependencies {
+                crate::dependencies::validate_transition_dependencies(
+                    self,
+                    &draft_store,
+                    &demoted.dependencies,
+                    &demoted,
+                    &self.task_prefix,
+                )?;
+            }
             let target_draft = draft_store.draft_path(&demoted.id, &demoted.title);
             let contents = serialization::serialize_task(&demoted, &original)
                 .map_err(|error| TaskStoreError::Serialization(error.to_string()))?;
