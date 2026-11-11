@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@codex'
 created_date: '2026-11-07T21:53:00Z'
-updated_date: '2026-11-11T23:53:00Z'
+updated_date: '2026-11-11T23:56:00Z'
 labels: []
 dependencies:
   - BACK-801
@@ -113,4 +113,6 @@ BACK-802.32 Port task list readiness projection to Rust is complete. Added TaskL
 BACK-802.33 Port task list ordering to Rust is complete. Added canonical default/id/ordinal/priority sorts and status grouping, including configured priority normalization/fallback and stable numeric-ID tie behavior. Legacy NaN ordinal comparisons use a stable insertion path. Live TypeScript parity covers sort modes, grouping, custom priorities, leading-zero equivalent IDs, and mixed NaN/finite ordinals. Rust suite: 174 passed; fmt and Clippy clean; relevant TypeScript suites: 38 passed. Reviews found no blockers. Groma remains unavailable.
 
 BACK-802.34 Port task list field filters to Rust is complete. Added exact status/exclude, type, project, priority, assignee/unassigned, any/all label, and canonical parent predicates. Filters compose with AND and preserve input order. Fuzzy text, modified files, and milestone resolution remain separate. Rust suite: 175 passed; fmt and Clippy clean; focused TypeScript filters: 32 passed. Reviews found no blockers. Groma remains unavailable.
+
+BACK-802.35 Port task modified-file filters to Rust is complete. TaskFilter now matches trimmed/lowercased path substrings with OR semantics, ignores empty filters and stored paths, and rejects tasks without matching files for effective filters. Live TypeScript parity covers these cases. Rust suite: 175 passed; fmt and Clippy clean; focused TypeScript suite: 5 passed. Reviews found no blockers. Groma remains unavailable.
 <!-- SECTION:NOTES:END -->

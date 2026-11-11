@@ -23,9 +23,9 @@ fn reference() -> Value {
     let script = r#"
 import { createTaskFilterMatcher } from "./src/utils/task-search.ts";
 const tasks = [
- {id:"TASK-1",status:"To Do",type:" Feature ",project:" Alpha ",priority:" High ",assignee:[" Alice ",""],labels:["UI","bug"],parentTaskId:"TASK-01"},
+ {id:"TASK-1",status:"To Do",type:" Feature ",project:" Alpha ",priority:" High ",assignee:[" Alice ",""],labels:["UI","bug"],parentTaskId:"TASK-01",modifiedFiles:[" src/web/components/SearchBox.tsx ",""]},
  {id:"TASK-2",status:"Done",type:"docs",project:"beta",assignee:[" "],labels:["infra"]},
- {id:"TASK-3",status:"To Do",type:"task",project:"Alpha",assignee:[],labels:[]},
+ {id:"TASK-3",status:"To Do",type:"task",project:"Alpha",assignee:[],labels:[],modifiedFiles:["docs/readme.md"]},
 ];
 const selected = options => tasks.filter(createTaskFilterMatcher(options,tasks)).map(task=>task.id);
 process.stdout.write(JSON.stringify({
@@ -34,6 +34,9 @@ process.stdout.write(JSON.stringify({
  unassigned:selected({unassigned:true}),
  excluded:selected({excludeStatus:[" to do "]}),
  empty:selected({status:[" ",""],type:[" ",""],project:[],priority:[" "],assignee:[" "],labels:[" "]}),
+ modifiedMany:selected({modifiedFiles:[" COMPONENTS/searchbox "," READme "]}),
+ modifiedEmpty:selected({modifiedFiles:[" ",""]}),
+ modifiedUnmatched:selected({modifiedFiles:["missing.ts"]}),
 }));
 "#;
     let output =
@@ -61,6 +64,7 @@ fn task_field_filters_match_typescript_normalization_and_composition() {
     first.assignee = vec![" Alice ".into(), "".into()];
     first.labels = vec!["UI".into(), "bug".into()];
     first.parent_task_id = Some("TASK-01".into());
+    first.modified_files = vec![" src/web/components/SearchBox.tsx ".into(), "".into()];
     let mut second = task("TASK-2", "Done");
     second.task_type = Some("docs".into());
     second.project = Some("beta".into());
@@ -69,6 +73,7 @@ fn task_field_filters_match_typescript_normalization_and_composition() {
     let mut third = task("TASK-3", "To Do");
     third.task_type = Some("task".into());
     third.project = Some("Alpha".into());
+    third.modified_files = vec!["docs/readme.md".into()];
     let tasks = vec![first, second, third];
     let combined = TaskFilter {
         statuses: vec![" to do ".into()],
@@ -102,6 +107,18 @@ fn task_field_filters_match_typescript_normalization_and_composition() {
         labels: vec![" ".into()],
         ..TaskFilter::default()
     };
+    let modified_many = TaskFilter {
+        modified_files: vec![" COMPONENTS/searchbox ".into(), " READme ".into()],
+        ..TaskFilter::default()
+    };
+    let modified_empty = TaskFilter {
+        modified_files: vec![" ".into(), "".into()],
+        ..TaskFilter::default()
+    };
+    let modified_unmatched = TaskFilter {
+        modified_files: vec!["missing.ts".into()],
+        ..TaskFilter::default()
+    };
     let active = tasks.as_slice();
     let rust = json!({
         "combined": ids(&filter_tasks(active, &combined, "task")),
@@ -109,6 +126,9 @@ fn task_field_filters_match_typescript_normalization_and_composition() {
         "unassigned": ids(&filter_tasks(active, &unassigned, "task")),
         "excluded": ids(&filter_tasks(active, &excluded, "task")),
         "empty": ids(&filter_tasks(active, &empty, "task")),
+        "modifiedMany": ids(&filter_tasks(active, &modified_many, "task")),
+        "modifiedEmpty": ids(&filter_tasks(active, &modified_empty, "task")),
+        "modifiedUnmatched": ids(&filter_tasks(active, &modified_unmatched, "task")),
     });
     assert_eq!(reference(), rust);
 }

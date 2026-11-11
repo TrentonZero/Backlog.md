@@ -21,6 +21,7 @@ pub struct TaskFilter {
     pub unassigned: bool,
     pub labels: Vec<String>,
     pub label_match: LabelMatch,
+    pub modified_files: Vec<String>,
     pub parent_task_id: Option<String>,
 }
 
@@ -42,6 +43,7 @@ pub fn filter_tasks<'a>(
         .map(|label| label.trim().to_lowercase())
         .filter(|label| !label.is_empty())
         .collect();
+    let modified_files = normalized_set(&filter.modified_files, false);
     let parent_id = filter
         .parent_task_id
         .as_deref()
@@ -111,6 +113,14 @@ pub fn filter_tasks<'a>(
                 if !matches {
                     return false;
                 }
+            }
+            if !modified_files.is_empty()
+                && !task.modified_files.iter().any(|path| {
+                    let path = path.trim().to_lowercase();
+                    !path.is_empty() && modified_files.iter().any(|filter| path.contains(filter))
+                })
+            {
+                return false;
             }
             if let Some(parent_id) = parent_id
                 && !task
