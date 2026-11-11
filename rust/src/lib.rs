@@ -19,6 +19,7 @@ pub mod serialization;
 pub mod storage;
 pub mod task_detail;
 pub mod task_file_ids;
+pub mod task_filtering;
 pub mod task_list;
 mod task_record_index;
 pub mod task_sorting;
