@@ -17,6 +17,7 @@ pub mod records;
 pub mod sections;
 pub mod serialization;
 pub mod storage;
+pub mod task_detail;
 pub mod task_file_ids;
 mod task_record_index;
 pub mod task_store;

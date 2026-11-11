@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@codex'
 created_date: '2026-11-07T21:53:00Z'
-updated_date: '2026-11-11T23:28:00Z'
+updated_date: '2026-11-11T23:33:00Z'
 labels: []
 dependencies:
   - BACK-801
@@ -105,4 +105,6 @@ BACK-802.28 completed: added Rust status-driven promotion and demotion operation
 BACK-802.29 completed: added the Rust dependency graph read model with live TypeScript parity for canonical aliases, active/draft/archive records, missing and ambiguous IDs, cycles, diamonds, archived completion, separate dependency/dependent depths, and deterministic ordering. The model accepts externally carried ambiguous IDs and is read-only. Full Rust fmt/Clippy and 168 tests passed; 37 focused Bun graph/CLI tests passed; required reviews found no blockers. The overall migration remains active with application queries, canonical CLI, browser HTTP/WebSocket server, MCP, TUI, distribution, and cutover gates still outstanding. Groma is unavailable.
 
 BACK-802.30 completed: added Rust readiness queries over the active+archived task corpus with draft exclusion, default/custom terminal statuses, blockers, missing/ambiguous IDs, and not-actionable archived/terminal targets. Dependency graph and readiness now share TaskRecordIndex for canonical identity, ambiguity, and completion rules. Full Rust fmt/Clippy and 170 tests passed; 24 focused Bun readiness/surface tests passed; required reviews found no blockers. Remaining application/query, canonical CLI, browser HTTP/WebSocket server, MCP, TUI, distribution, and compatibility/cutover work remains. Groma is unavailable.
+
+BACK-802.31 Port task detail assembly to Rust is complete. Added TaskDetail and build_task_detail using the same active/archived corpus, statuses, ambiguous IDs, and prefix for both derived queries. Verified TypeScript parity across resolved, blocked, missing, ambiguous, archived, and terminal cases; serialization excludes derived fields. Rust suite: 172 passed; fmt and Clippy clean; focused TypeScript suite: 24 passed. Cold simplicity and complexity reviews had no blocking findings. Groma is unavailable (command not found).
 <!-- SECTION:NOTES:END -->
