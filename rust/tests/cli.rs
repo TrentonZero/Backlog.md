@@ -1543,6 +1543,64 @@ fn rust_task_view_plain_and_json_match_the_live_typescript_cli() {
 }
 
 #[test]
+fn rust_task_id_shorthand_and_tasks_alias_match_the_live_typescript_cli() {
+    let fixture = fixture();
+    for args in [
+        &["task", "1", "--plain"][..],
+        &["task", "--json", "1"][..],
+        &["task", "1"][..],
+        &["tasks", "task-1", "--json"][..],
+        &["task", "999", "--plain"][..],
+        &["task", "complete"][..],
+        &["task", "complete", "foo"][..],
+        &["task", "complete", "--json"][..],
+        &["task", "complete", "foo", "--json"][..],
+        &["task", "--json", "complete"][..],
+        &["task", "view", "1", "--json"][..],
+        &["task", "list", "--plain"][..],
+        &["task", "1", "--plain", "--json"][..],
+        &["task"][..],
+    ] {
+        let expected = typescript_cli(args, &fixture.0);
+        let actual = rust_cli(args, &fixture.0);
+        assert_eq!(
+            actual.status.code(),
+            expected.status.code(),
+            "args: {args:?}"
+        );
+        assert_eq!(actual.stderr, expected.stderr, "args: {args:?}");
+        if args.contains(&"--json") && actual.status.success() {
+            let actual_json: Value = serde_json::from_slice(&actual.stdout)
+                .unwrap_or_else(|error| panic!("Rust JSON parse failed for {args:?}: {error}"));
+            let expected_json: Value =
+                serde_json::from_slice(&expected.stdout).unwrap_or_else(|error| {
+                    panic!("TypeScript JSON parse failed for {args:?}: {error}")
+                });
+            assert_eq!(actual_json, expected_json, "args: {args:?}");
+        } else if args == ["task"] {
+            let actual_help = String::from_utf8_lossy(&actual.stdout);
+            let expected_help = String::from_utf8_lossy(&expected.stdout);
+            assert!(
+                actual_help.contains("Usage:"),
+                "Rust should print task help"
+            );
+            assert!(
+                !expected_help.is_empty(),
+                "TypeScript should print task help"
+            );
+            for subcommand in ["create", "list", "view"] {
+                assert!(
+                    actual_help.contains(subcommand),
+                    "missing {subcommand} in task help"
+                );
+            }
+        } else {
+            assert_eq!(actual.stdout, expected.stdout, "args: {args:?}");
+        }
+    }
+}
+
+#[test]
 fn rust_task_view_rich_details_match_the_live_typescript_cli() {
     let fixture = fixture();
     fixture.file(

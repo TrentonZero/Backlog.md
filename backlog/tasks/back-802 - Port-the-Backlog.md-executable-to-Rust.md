@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@codex'
 created_date: '2026-11-07T21:53:00Z'
-updated_date: '2026-11-12T03:19:00Z'
+updated_date: '2026-11-12T15:01:00Z'
 labels: []
 dependencies:
   - BACK-801
@@ -139,4 +139,8 @@ Completed BACK-802.47: Rust task edit now supports Acceptance Criteria replaceme
 Completed BACK-802.48: added Rust `draft list` with local read-only DraftStore access, plain and JSON outputs, sorting, count, and pagination. Verified zero-padded draft IDs and huge window values against TypeScript. Full Rust suite, 35 scoped Bun tests, Biome, rustfmt, Clippy, and build passed; cold simplicity and full-context complexity reviews cleared. Groma remains unavailable.
 
 BACK-802.49 completed: Rust draft create now matches the supported TypeScript workflow with auto_commit unset/false. Cargo suite, 9 focused Bun tests, Biome, rustfmt, Clippy, and build passed; cold and complexity reviews cleared. BACK-802.50 tracks remaining selected-path Git commits for configured auto_commit.
+
+BACK-802.52 completed: exposed Rust draft archive/promote and task demote CLI commands, including exact changed-path reporting for selected-path auto-commit. Full serial Rust suite and 60 scoped Bun tests passed; checks and reviews cleared. Remaining migration stages are unimplemented canonical CLI groups (documents, decisions, milestones, config/doctor/search/overview/completion/instructions), HTTP/WebSocket server and retained browser integration, MCP adapter, TUI, and six-target/npm/Nix distribution and cutover verification.
+
+BACK-802.53 completed: added `task <id>` and the `tasks` alias, with TypeScript-compatible plain/JSON/default output, task help, and hidden `task complete` refusal behavior. Full serial Rust suite passed (65 CLI tests plus all unit/integration/doc tests), 54 scoped Bun tests passed, and formatting, Clippy, build, Biome and diff checks passed. BACK-802.54 is queued to add Rust `doc list --plain` with shared list-window behavior.
 <!-- SECTION:NOTES:END -->

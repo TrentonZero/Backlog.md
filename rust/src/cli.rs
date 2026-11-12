@@ -16,7 +16,7 @@ use crate::{
     task_sorting::{TaskSection, section_tasks, sort_tasks},
     task_store::TaskStore,
 };
-use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
+use clap::{ArgAction, Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use serde_json::{Value, json};
 use std::{
     collections::{HashMap, HashSet},
@@ -35,9 +35,18 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Task commands.
+    #[command(alias = "tasks")]
     Task {
         #[command(subcommand)]
-        command: TaskCommand,
+        command: Option<TaskCommand>,
+        /// Task ID shorthand; equivalent to `task view <taskId>`.
+        task_id: Option<String>,
+        /// Use human-readable output for the task ID shorthand.
+        #[arg(long)]
+        plain: bool,
+        /// Use versioned JSON output for the task ID shorthand.
+        #[arg(long)]
+        json: bool,
     },
     /// Draft commands.
     Draft {
@@ -143,6 +152,13 @@ enum TaskCommand {
     Delete { task_id: String },
     /// Move an active task back to drafts.
     Demote { task_id: String },
+    /// Removed command; directs callers to archive.
+    #[command(hide = true, disable_help_flag = true)]
+    Complete {
+        /// Accepted for compatibility with the removed command.
+        #[arg(num_args = 0.., allow_hyphen_values = true)]
+        ignored: Vec<String>,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -452,29 +468,74 @@ pub fn run() -> Result<(), String> {
     let cli = Cli::parse();
     match cli.command {
         Command::Task {
-            command: TaskCommand::List(options),
+            command: Some(TaskCommand::List(options)),
+            ..
         } => run_task_list(options),
         Command::Task {
-            command: TaskCommand::View { task_id, options },
+            command: Some(TaskCommand::View { task_id, options }),
+            ..
         } => run_task_view(&task_id, options),
         Command::Task {
-            command: TaskCommand::Create(options),
+            command: Some(TaskCommand::Create(options)),
+            ..
         } => run_task_create(*options),
         Command::Task {
-            command: TaskCommand::Edit(options),
+            command: Some(TaskCommand::Edit(options)),
+            ..
         } => run_task_edit(*options),
         Command::Task {
-            command: TaskCommand::Archive { task_id },
+            command: Some(TaskCommand::Archive { task_id }),
+            ..
         } => run_task_archive(&task_id),
         Command::Task {
-            command: TaskCommand::Restore { task_id },
+            command: Some(TaskCommand::Restore { task_id }),
+            ..
         } => run_task_restore(&task_id),
         Command::Task {
-            command: TaskCommand::Delete { task_id },
+            command: Some(TaskCommand::Delete { task_id }),
+            ..
         } => run_task_delete(&task_id),
         Command::Task {
-            command: TaskCommand::Demote { task_id },
+            command: Some(TaskCommand::Demote { task_id }),
+            ..
         } => run_task_demote(&task_id),
+        Command::Task {
+            command: Some(TaskCommand::Complete { ignored }),
+            json,
+            ..
+        } => {
+            if json || ignored.iter().any(|argument| argument == "--json") {
+                return Err("error: unknown option '--json'\nRun with --help to see accepted fields and examples.".into());
+            }
+            Err("backlog task complete was removed. Use backlog task archive <id>.".into())
+        }
+        Command::Task {
+            command: None,
+            task_id: Some(task_id),
+            plain,
+            json,
+        } => {
+            if plain && json {
+                return Err("--json cannot be combined with --plain.".into());
+            }
+            run_task_view(
+                &task_id,
+                TaskViewArgs {
+                    plain: plain || !json,
+                    json,
+                },
+            )
+        }
+        Command::Task {
+            command: None,
+            task_id: None,
+            ..
+        } => {
+            let mut command = Cli::command();
+            let task = command.find_subcommand_mut("task").unwrap();
+            task.print_help().map_err(|error| error.to_string())?;
+            write_stdout("\n")
+        }
         Command::Draft {
             command: Some(DraftCommand::List(options)),
             ..
