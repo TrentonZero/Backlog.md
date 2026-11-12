@@ -1,8 +1,16 @@
 # Rust migration components
 
-This internal Cargo library is the start of the [approved executable migration](../docs/superpowers/specs/2026-11-07-rust-migration-design.md).
-The shipped CLI, TUI, browser server and MCP adapter still use TypeScript. There
-is no Rust command-line executable or installation cutover yet.
+This Cargo package contains the staged [Rust executable migration](../docs/superpowers/specs/2026-11-07-rust-migration-design.md).
+The `backlog` binary currently provides root help/version and the noninteractive
+`task list --plain` and `task list --json` commands. The shipped launcher,
+interactive TUI, browser server and MCP adapter still use TypeScript; installation
+cutover has not happened.
+
+Run the Rust task list from this repository with:
+
+```sh
+cargo run --manifest-path rust/Cargo.toml -- task list --plain
+```
 
 Use Rust 1.98 or later:
 
@@ -70,11 +78,12 @@ preprocessing out of configuration. Config parsing and serialization operate on
 strings; persistence and physical record migrations remain later work.
 
 The [discovery module](src/discovery.rs) selects runtime cwd, root or folder
-configuration, and the nearest marked project. Selection is read-only. Root
+configuration, and the nearest marked project. The Rust CLI uses it for local
+task listing. Selection is read-only. Root
 metadata recognition is independent of full config parsing; custom directories
 use the existing lexical path rule, including descendant symlinks. Ancestor
 markers work without Git; the installed Git executable is only an optional
-fallback. Discovery adds no CLI integration, caches, or watchers.
+fallback. Discovery adds no caches or watchers.
 
 The [discovery tests](tests/discovery.rs) cover precedence, invalid overrides,
 config markers, root-only paths and symlinks. Host separator rules are tested
