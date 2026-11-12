@@ -334,5 +334,10 @@ pub fn serialize_document(
                 .map(|v| json!(v)),
         ),
     ];
-    fields_with_source(fields, original_source, &document.raw_content)
+    let source = fields_with_source(fields, original_source, &document.raw_content)?;
+    if original_source.is_empty() && document.raw_content.is_empty() {
+        Ok(format!("{source}\n"))
+    } else {
+        Ok(source)
+    }
 }

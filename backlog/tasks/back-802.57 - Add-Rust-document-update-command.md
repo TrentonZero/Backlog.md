@@ -1,10 +1,11 @@
 ---
 id: BACK-802.57
 title: Add Rust document update command
-status: To Do
+status: In Progress
 assignee:
   - '@codex'
 created_date: '2026-11-12T15:05:00Z'
+updated_date: '2026-11-12T15:34:00Z'
 labels: []
 dependencies:
   - BACK-802.56
@@ -38,3 +39,9 @@ The Rust DocumentStore can update a document while preserving unmanaged content,
 - [ ] #2 bun run check . passes when formatting/linting touched
 - [ ] #3 bun test (or scoped test) passes
 <!-- DOD:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+Compare TypeScript doc update options, validation, path moves, source-preserving serialization, archive refusals and auto-commit behavior with the existing Rust DocumentStore. Add isolated Rust/TypeScript process parity for success, omitted fields, content preservation, validation and no-write failures. Run focused/full checks, review and finalize, then continue to document lifecycle.
+<!-- SECTION:PLAN:END -->

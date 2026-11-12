@@ -3159,3 +3159,113 @@ fn rust_document_view_matches_typescript_ids_archives_and_errors() {
         assert_eq!(actual.stderr, expected.stderr, "args: {args:?}");
     }
 }
+
+fn normalize_document_created_timestamp(source: &str) -> String {
+    let mut in_frontmatter = false;
+    let mut normalized = String::new();
+    for line in source.split_inclusive('\n') {
+        if line.trim_end_matches('\n') == "---" {
+            in_frontmatter = !in_frontmatter;
+        }
+        if in_frontmatter && line.starts_with("created_date:") {
+            normalized.push_str("created_date: <generated>\n");
+        } else {
+            normalized.push_str(line);
+        }
+    }
+    normalized
+}
+
+#[test]
+fn rust_document_create_matches_typescript_content_output_and_refusals() {
+    for (args, relative_path) in [
+        (
+            &["doc", "create", "  Quick Start  "][..],
+            "backlog/docs/doc-1 - Quick-Start.md",
+        ),
+        (
+            &[
+                "doc",
+                "create",
+                "API Guidelines",
+                "--type",
+                "specification",
+                "--path",
+                "guides/api",
+                "--plain",
+            ][..],
+            "backlog/docs/guides/api/doc-1 - API-Guidelines.md",
+        ),
+        (
+            &["doc", "create", "EmptyType", "--type", ""][..],
+            "backlog/docs/doc-1 - EmptyType.md",
+        ),
+    ] {
+        let reference = fixture();
+        let candidate = fixture();
+        let expected = typescript_cli(args, &reference.0);
+        let actual = rust_cli(args, &candidate.0);
+        assert_eq!(
+            actual.status.code(),
+            expected.status.code(),
+            "args: {args:?}"
+        );
+        assert_eq!(actual.stdout, expected.stdout, "args: {args:?}");
+        assert_eq!(actual.stderr, expected.stderr, "args: {args:?}");
+
+        let reference_path = reference.0.join(relative_path);
+        let candidate_path = candidate.0.join(relative_path);
+        let expected_markdown = std::fs::read_to_string(reference_path).unwrap();
+        let actual_markdown = std::fs::read_to_string(candidate_path).unwrap();
+        assert_eq!(
+            normalize_document_created_timestamp(&actual_markdown),
+            normalize_document_created_timestamp(&expected_markdown),
+            "args: {args:?}"
+        );
+    }
+
+    let absolute_path = std::env::temp_dir().join(format!(
+        "backlog-rust-doc-create-outside-{}-{}",
+        std::process::id(),
+        NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)
+    ));
+    assert!(!absolute_path.exists());
+    let absolute_path = absolute_path.to_string_lossy().into_owned();
+    let invalid_cases = [
+        vec!["doc", "create", ""],
+        vec!["doc", "create", "Unsafe", "--type", "invalid"],
+        vec!["doc", "create", "Unsafe", "--path", &absolute_path],
+        vec!["doc", "create", "Unsafe", "--path", "../outside"],
+        vec!["doc", "create", "Unsafe", "--path", "..\\outside"],
+    ];
+    for args in invalid_cases {
+        let reference = fixture();
+        let candidate = fixture();
+        let expected = typescript_cli(&args, &reference.0);
+        let actual = rust_cli(&args, &candidate.0);
+        assert_eq!(
+            actual.status.code(),
+            expected.status.code(),
+            "args: {args:?}"
+        );
+        assert_eq!(actual.stdout, expected.stdout, "args: {args:?}");
+        assert_eq!(actual.stderr, expected.stderr, "args: {args:?}");
+        assert!(
+            !candidate.0.join("backlog/docs").exists(),
+            "invalid create wrote a docs directory: {args:?}"
+        );
+        assert!(
+            !reference.0.join("backlog/docs").exists(),
+            "invalid reference create wrote a docs directory: {args:?}"
+        );
+        assert!(
+            !candidate.0.join("outside").exists(),
+            "invalid create wrote outside docs: {args:?}"
+        );
+        assert!(
+            !reference.0.join("outside").exists(),
+            "invalid reference create wrote outside docs: {args:?}"
+        );
+    }
+    assert!(!std::path::Path::new(&absolute_path).exists());
+}

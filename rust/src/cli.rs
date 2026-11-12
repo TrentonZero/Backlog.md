@@ -68,6 +68,8 @@ enum Command {
 
 #[derive(Debug, Subcommand)]
 enum DocCommand {
+    /// Create a document.
+    Create(DocCreateArgs),
     /// List documents in the configured docs directory.
     List(DocListArgs),
     /// Display a document's Markdown content.
@@ -76,6 +78,21 @@ enum DocCommand {
         #[command(flatten)]
         options: DocumentViewArgs,
     },
+}
+
+#[derive(Debug, Args)]
+struct DocCreateArgs {
+    /// Document title.
+    title: String,
+    /// Subdirectory under the docs directory.
+    #[arg(short, long)]
+    path: Option<String>,
+    /// Document type.
+    #[arg(short = 't', long = "type")]
+    document_type: Option<String>,
+    /// Use human-readable text output.
+    #[arg(long)]
+    plain: bool,
 }
 
 #[derive(Debug, Args)]
@@ -617,6 +634,9 @@ pub fn run() -> Result<(), String> {
             task_id: None,
             ..
         } => Err("Usage: backlog draft <command> or backlog draft <draftId>".into()),
+        Command::Doc {
+            command: DocCommand::Create(options),
+        } => run_document_create(options),
         Command::Doc {
             command: DocCommand::List(options),
         } => run_document_list(options),
@@ -2407,6 +2427,58 @@ fn run_document_view(document_id: &str, options: DocumentViewArgs) -> Result<(),
     } else {
         write_stdout(&format!("{content}\n"))
     }
+}
+
+fn run_document_create(options: DocCreateArgs) -> Result<(), String> {
+    let context = project_context()?;
+    let title = options.title.trim();
+    if title.is_empty() {
+        return Err("Title is required to create a document.".into());
+    }
+    let _ = options.plain;
+    let document = crate::records::DocumentRecord {
+        id: String::new(),
+        title: title.to_owned(),
+        document_type: options
+            .document_type
+            .filter(|document_type| !document_type.is_empty())
+            .unwrap_or_else(|| "other".into()),
+        created_date: crate::task_store::utc_timestamp(),
+        updated_date: None,
+        raw_content: String::new(),
+        tags: None,
+    };
+    let store = DocumentStore::new(&context.root, &context.backlog_directory, &context.prefix);
+    let entry = store
+        .create_document(
+            document,
+            &context.config,
+            options.path.as_deref().unwrap_or_default(),
+        )
+        .map_err(|error| error.to_string())?;
+    commit_created_record(
+        &context,
+        "Document",
+        &format!("backlog: Add document {}", entry.document.id),
+        &entry.path,
+    )?;
+    let docs_directory = context.root.join(&context.backlog_directory).join("docs");
+    let relative_path = entry
+        .path
+        .strip_prefix(docs_directory)
+        .map_err(|error| error.to_string())?
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/");
+    let backlog_directory = context
+        .backlog_directory
+        .to_string_lossy()
+        .replace('\\', "/");
+    write_stdout(&format!(
+        "Created document {}\nPath: {backlog_directory}/docs/{relative_path}\n",
+        entry.document.id
+    ))
 }
 
 fn run_draft_view(task_id: &str, options: DraftViewArgs) -> Result<(), String> {

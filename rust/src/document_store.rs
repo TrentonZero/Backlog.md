@@ -16,7 +16,7 @@ use std::{
     collections::{HashSet, VecDeque},
     error::Error,
     fmt, fs,
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
 };
 
 #[derive(Clone, Debug, PartialEq)]
@@ -65,6 +65,7 @@ pub enum DocumentStoreError {
     Storage(String),
     Serialization(String),
     InvalidPath(String),
+    InvalidType(String),
 }
 
 impl fmt::Display for DocumentStoreError {
@@ -107,6 +108,7 @@ impl fmt::Display for DocumentStoreError {
             | Self::Storage(message)
             | Self::Serialization(message)
             | Self::InvalidPath(message) => formatter.write_str(message),
+            Self::InvalidType(message) => formatter.write_str(message),
         }
     }
 }
@@ -189,6 +191,13 @@ impl DocumentStore {
         config: &Config,
         sub_path: &str,
     ) -> Result<DocumentFileEntry, DocumentStoreError> {
+        let sub_path = normalize_document_sub_path(sub_path)?;
+        if !["readme", "guide", "specification", "other"].contains(&document.document_type.as_str())
+        {
+            return Err(DocumentStoreError::InvalidType(
+                "Document type must be one of: readme, guide, specification, other.".into(),
+            ));
+        }
         let lock = self
             .storage
             .acquire_create_lock()
@@ -200,7 +209,7 @@ impl DocumentStore {
             .filter(|width| width.is_finite() && *width > 0.0)
             .map(|width| width as usize);
         document.id = generate_next_id(&occupied, "doc", padding).to_lowercase();
-        let relative = self.document_relative_path(&document, sub_path)?;
+        let relative = self.document_relative_path(&document, &sub_path);
         let target = self.docs_directory.join(relative);
         let source = serialization::serialize_document(&document, "")
             .map_err(|error| DocumentStoreError::Serialization(error.to_string()))?;
@@ -258,7 +267,8 @@ impl DocumentStore {
             .ok()
             .and_then(Path::parent)
             .unwrap_or_else(|| Path::new(""));
-        let relative = self.document_relative_path(&document, &sub_path.to_string_lossy())?;
+        let sub_path = normalize_document_sub_path(&sub_path.to_string_lossy())?;
+        let relative = self.document_relative_path(&document, &sub_path);
         let destination = self.docs_directory.join(relative);
         lock.check()
             .map_err(|error| DocumentStoreError::Lock(error.to_string()))?;
@@ -580,29 +590,12 @@ impl DocumentStore {
         ids
     }
 
-    fn document_relative_path(
-        &self,
-        document: &DocumentRecord,
-        sub_path: &str,
-    ) -> Result<PathBuf, DocumentStoreError> {
-        let sub_path = Path::new(sub_path.trim());
-        if sub_path.is_absolute()
-            || sub_path.components().any(|component| {
-                matches!(
-                    component,
-                    Component::ParentDir | Component::RootDir | Component::Prefix(_)
-                )
-            })
-        {
-            return Err(DocumentStoreError::InvalidPath(
-                "Document path must be relative and cannot include traversal segments.".into(),
-            ));
-        }
+    fn document_relative_path(&self, document: &DocumentRecord, sub_path: &Path) -> PathBuf {
         let title = sanitize_filename(&document.title);
-        Ok(sub_path.join(format!(
+        sub_path.join(format!(
             "{} - {title}.md",
             normalize_document_id(&document.id)
-        )))
+        ))
     }
 
     fn relative_path(&self, path: &Path) -> PathBuf {
@@ -619,6 +612,32 @@ impl DocumentStore {
             .collect::<Vec<_>>()
             .join("/")
     }
+}
+
+fn normalize_document_sub_path(value: &str) -> Result<PathBuf, DocumentStoreError> {
+    let value = value.trim();
+    let bytes = value.as_bytes();
+    let has_windows_absolute_prefix = bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'/' | b'\\');
+    if value.starts_with('/') || value.starts_with('\\') || has_windows_absolute_prefix {
+        return Err(DocumentStoreError::InvalidPath(
+            "Document path must be relative to the docs directory.".into(),
+        ));
+    }
+
+    let segments: Vec<_> = value
+        .split(['/', '\\'])
+        .map(str::trim)
+        .filter(|segment| !segment.is_empty() && *segment != ".")
+        .collect();
+    if segments.contains(&"..") {
+        return Err(DocumentStoreError::InvalidPath(
+            "Document path cannot include traversal segments.".into(),
+        ));
+    }
+    Ok(segments.iter().collect())
 }
 
 fn locale_compare(left: &str, right: &str) -> std::cmp::Ordering {
