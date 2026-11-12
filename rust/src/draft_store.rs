@@ -35,12 +35,18 @@ impl fmt::Display for DraftStoreError {
         match self {
             Self::Ambiguous { id, paths } => write!(
                 f,
-                "Draft ID {} is ambiguous; {} files match:\n{}",
+                "Draft ID {} is ambiguous; {} files match:\n{}\nRename one file to a distinct numeric id, then make its frontmatter agree.",
                 canonical_task_id(id, "draft"),
                 paths.len(),
                 paths
                     .iter()
-                    .map(|path| format!("  - {path}"))
+                    .map(|path| {
+                        let name = Path::new(path)
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .unwrap_or(path);
+                        format!("  - {name}")
+                    })
                     .collect::<Vec<_>>()
                     .join("\n")
             ),
@@ -254,7 +260,7 @@ impl DraftStore {
         Ok(matches.pop())
     }
 
-    fn read_entry(&self, path: &Path) -> Result<DraftFileEntry, DraftStoreError> {
+    pub(crate) fn read_entry(&self, path: &Path) -> Result<DraftFileEntry, DraftStoreError> {
         let source = self
             .storage
             .read(path)

@@ -3,15 +3,14 @@
 This Cargo package contains the staged [Rust executable migration](../docs/superpowers/specs/2026-11-07-rust-migration-design.md).
 The `backlog` binary currently provides root help/version plus noninteractive
 `task create`, `task edit`, `task list`, `task view`, `task archive`,
-`task restore`, `task delete`, and draft list and create commands. Task list and
-view, and draft list, support plain or JSON output; list commands support
-sorting and bounded output windows. Task creation supports confirmation output
-or full plain detail; task edit supports core fields, dependency links,
-references, documentation, acceptance criteria, Definition of Done items,
-explicit clears, indexed checklist changes, incremental list changes, and
-optional full plain detail. Configured auto-commit applies to supported task and
-draft writes, committing only their record paths while preserving unrelated
-staged changes.
+`task restore`, `task delete`, and draft list, create, view, and edit commands.
+Task list/view and draft list support plain or JSON output; list commands support
+sorting and bounded output windows. Draft view/edit use plain detail output.
+Task and draft edit support shared fields, dependency links, references,
+documentation, checklist sections, and draft-specific status validation. Task
+creation supports confirmation output or full plain detail. Configured
+auto-commit applies to supported task and draft writes, committing only their
+record paths while preserving unrelated staged changes.
 The shipped launcher,
 interactive TUI, browser server and MCP adapter still use TypeScript; installation
 cutover has not happened.
@@ -22,6 +21,8 @@ Run the Rust task list from this repository with:
 cargo run --manifest-path rust/Cargo.toml -- task list --plain
 cargo run --manifest-path rust/Cargo.toml -- task view TASK-1 --json
 cargo run --manifest-path rust/Cargo.toml -- task create "Add tests" --parent TASK-1
+cargo run --manifest-path rust/Cargo.toml -- draft view DRAFT-1 --plain
+cargo run --manifest-path rust/Cargo.toml -- draft edit DRAFT-1 --title "Refined plan"
 ```
 
 Use Rust 1.98 or later:

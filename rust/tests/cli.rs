@@ -858,6 +858,444 @@ fn rust_task_edit_through_an_uncommitted_symlink_matches_typescript() {
 }
 
 #[test]
+fn rust_draft_view_and_id_shorthand_match_typescript_plain_output() {
+    let expected_fixture = Fixture::new();
+    let actual_fixture = Fixture::new();
+    for fixture in [&expected_fixture, &actual_fixture] {
+        fixture.file(
+            "backlog/drafts/draft-1-first.md",
+            "---\nid: draft-1\ntitle: First draft\nstatus: Draft\npriority: high\ncreated_date: 2026-01-01\n---\nDraft body.\n",
+        );
+    }
+
+    for args in [
+        &["draft", "view", "draft-1", "--plain"][..],
+        &["draft", "draft-1", "--plain"][..],
+    ] {
+        let expected = typescript_cli(args, &expected_fixture.0);
+        let actual = rust_cli(args, &actual_fixture.0);
+        assert_eq!(actual.status.code(), expected.status.code(), "{args:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&actual.stdout)
+                .replace(&actual_fixture.0.to_string_lossy().to_string(), "<ROOT>"),
+            String::from_utf8_lossy(&expected.stdout)
+                .replace(&expected_fixture.0.to_string_lossy().to_string(), "<ROOT>"),
+            "{args:?}"
+        );
+        assert_eq!(actual.stderr, expected.stderr, "{args:?}");
+    }
+}
+
+#[test]
+fn rust_draft_edit_help_lists_supported_field_operations() {
+    let fixture = Fixture::new();
+    let output = rust_cli(&["draft", "edit", "--help"], &fixture.0);
+    assert!(output.status.success());
+    let help = String::from_utf8_lossy(&output.stdout);
+    for option in [
+        "draft edit [OPTIONS]",
+        "--status <STATUS>",
+        "draft edits only accept Draft",
+        "--plan <PLAN>",
+        "--append-notes <APPEND_NOTES>",
+        "--comment <COMMENT>",
+        "--final-summary <FINAL_SUMMARY>",
+        "--modified-file <MODIFIED_FILES>",
+        "--check-ac <CHECK_AC>",
+        "--check-dod <CHECK_DOD>",
+    ] {
+        assert!(help.contains(option), "missing {option} in draft edit help");
+    }
+}
+
+#[test]
+fn rust_draft_edit_matches_typescript_and_preserves_unmanaged_source() {
+    let expected_fixture = Fixture::new();
+    let actual_fixture = Fixture::new();
+    for fixture in [&expected_fixture, &actual_fixture] {
+        fixture.file(
+            "backlog.config.yml",
+            "project_name: CLI Fixture\ntask_prefix: task\nstatuses:\n  - To Do\n  - Done\npriorities:\n  - High\n  - Low\n",
+        );
+        fixture.file(
+            "backlog/drafts/draft-1-first.md",
+            "---\nid: draft-1\ntitle: First draft\nstatus: Draft\ncreated_date: 2026-01-01\ncustom_field: retain me\n---\nOriginal body.\n",
+        );
+    }
+    let args = [
+        "draft",
+        "edit",
+        "draft-1",
+        "--title",
+        "Renamed draft",
+        "--description",
+        "New body",
+        "--assignee",
+        "@alice",
+        "--label",
+        "ui",
+        "--priority",
+        "high",
+        "--plain",
+    ];
+    let expected = typescript_cli(&args, &expected_fixture.0);
+    let actual = rust_cli(&args, &actual_fixture.0);
+    assert_eq!(actual.status.code(), expected.status.code());
+    assert_eq!(
+        String::from_utf8_lossy(&actual.stdout)
+            .replace(&actual_fixture.0.to_string_lossy().to_string(), "<ROOT>"),
+        String::from_utf8_lossy(&expected.stdout)
+            .replace(&expected_fixture.0.to_string_lossy().to_string(), "<ROOT>")
+    );
+    assert_eq!(actual.stderr, expected.stderr);
+
+    for fixture in [&expected_fixture, &actual_fixture] {
+        let path = fixture.0.join("backlog/drafts/draft-1 - Renamed-draft.md");
+        let contents = std::fs::read_to_string(path).unwrap();
+        assert!(contents.contains("custom_field: retain me"));
+        assert!(contents.contains("New body"));
+        assert!(contents.contains("Original body."));
+    }
+    let actual = backlog_md::records::parse_task(
+        &std::fs::read_to_string(
+            actual_fixture
+                .0
+                .join("backlog/drafts/draft-1 - Renamed-draft.md"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let expected = backlog_md::records::parse_task(
+        &std::fs::read_to_string(
+            expected_fixture
+                .0
+                .join("backlog/drafts/draft-1 - Renamed-draft.md"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(actual, expected);
+}
+
+#[test]
+fn rust_draft_edit_updates_plan_notes_comments_summary_and_modified_files() {
+    let expected_fixture = Fixture::new();
+    let actual_fixture = Fixture::new();
+    for fixture in [&expected_fixture, &actual_fixture] {
+        fixture.file(
+            "backlog/drafts/draft-1-fields.md",
+            "---\nid: draft-1\ntitle: Field draft\nstatus: Draft\ncreated_date: 2026-01-01\n---\n",
+        );
+    }
+    let args = [
+        "draft",
+        "edit",
+        "draft-1",
+        "--plan",
+        "Implementation plan",
+        "--append-plan",
+        "Next step",
+        "--notes",
+        "Draft notes",
+        "--append-notes",
+        "More notes",
+        "--comment",
+        "Reviewed by the team",
+        "--comment-author",
+        "Alex",
+        "--final-summary",
+        "Summary",
+        "--append-final-summary",
+        "Further summary",
+        "--modified-file",
+        "src/file.rs",
+        "--plain",
+    ];
+    let expected = typescript_cli(&args, &expected_fixture.0);
+    let actual = rust_cli(&args, &actual_fixture.0);
+    assert_eq!(actual.status.code(), expected.status.code());
+    assert_eq!(
+        String::from_utf8_lossy(&actual.stdout)
+            .replace(&actual_fixture.0.to_string_lossy().to_string(), "<ROOT>"),
+        String::from_utf8_lossy(&expected.stdout)
+            .replace(&expected_fixture.0.to_string_lossy().to_string(), "<ROOT>")
+    );
+    assert_eq!(actual.stderr, expected.stderr);
+    let actual = backlog_md::records::parse_task(
+        &std::fs::read_to_string(
+            actual_fixture
+                .0
+                .join("backlog/drafts/draft-1 - Field-draft.md"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let expected = backlog_md::records::parse_task(
+        &std::fs::read_to_string(
+            expected_fixture
+                .0
+                .join("backlog/drafts/draft-1 - Field-draft.md"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(actual, expected);
+    assert_eq!(
+        actual.implementation_plan.as_deref(),
+        Some("Implementation plan\n\nNext step")
+    );
+    assert_eq!(
+        actual.implementation_notes.as_deref(),
+        Some("Draft notes\n\nMore notes")
+    );
+    assert_eq!(actual.comments[0].body, "Reviewed by the team");
+    assert_eq!(actual.comments[0].author.as_deref(), Some("Alex"));
+    assert_eq!(
+        actual.final_summary.as_deref(),
+        Some("Summary\n\nFurther summary")
+    );
+    assert_eq!(actual.modified_files, ["src/file.rs"]);
+}
+
+#[test]
+fn rust_draft_edit_title_rename_auto_commits_both_paths_and_keeps_unrelated_staged_work() {
+    let expected_fixture = Fixture::new();
+    let actual_fixture = Fixture::new();
+    for fixture in [&expected_fixture, &actual_fixture] {
+        fixture.file(
+            "backlog.config.yml",
+            "project_name: CLI Fixture\ntask_prefix: task\nstatuses:\n  - To Do\n  - Done\nauto_commit: true\n",
+        );
+        fixture.file(
+            "backlog/drafts/draft-1-first.md",
+            "---\nid: draft-1\ntitle: First draft\nstatus: Draft\ncreated_date: 2026-01-01\n---\n",
+        );
+        initialize_git_fixture(fixture);
+    }
+    let args = ["draft", "edit", "draft-1", "--title", "Renamed draft"];
+    let expected = typescript_cli(&args, &expected_fixture.0);
+    let actual = rust_cli(&args, &actual_fixture.0);
+    assert_eq!(actual.status.code(), expected.status.code());
+    assert_eq!(actual.stdout, expected.stdout);
+    assert_eq!(actual.stderr, expected.stderr);
+    assert_eq!(
+        selected_commit_result(&actual_fixture),
+        selected_commit_result(&expected_fixture)
+    );
+    assert_eq!(
+        git(&actual_fixture.0, &["diff", "--cached", "--name-only"]),
+        "UNRELATED.txt"
+    );
+    assert_eq!(
+        git(&actual_fixture.0, &["status", "--porcelain"]),
+        "A  UNRELATED.txt"
+    );
+}
+
+#[test]
+fn rust_draft_edit_status_refusal_matches_typescript_without_mutation() {
+    let expected_fixture = Fixture::new();
+    let actual_fixture = Fixture::new();
+    for fixture in [&expected_fixture, &actual_fixture] {
+        fixture.file(
+            "backlog/drafts/draft-1-first.md",
+            "---\nid: draft-1\ntitle: First draft\nstatus: Draft\ncreated_date: 2026-01-01\n---\nOriginal body.\n",
+        );
+    }
+    let path = "backlog/drafts/draft-1-first.md";
+    let expected_before = std::fs::read(expected_fixture.0.join(path)).unwrap();
+    let actual_before = std::fs::read(actual_fixture.0.join(path)).unwrap();
+    let args = ["draft", "edit", "draft-1", "--status", "To Do"];
+    let expected = typescript_cli(&args, &expected_fixture.0);
+    let actual = rust_cli(&args, &actual_fixture.0);
+    assert_eq!(actual.status.code(), expected.status.code());
+    assert_eq!(actual.stdout, expected.stdout);
+    assert_eq!(actual.stderr, expected.stderr);
+    assert_eq!(
+        std::fs::read(expected_fixture.0.join(path)).unwrap(),
+        expected_before
+    );
+    assert_eq!(
+        std::fs::read(actual_fixture.0.join(path)).unwrap(),
+        actual_before
+    );
+}
+
+#[test]
+fn rust_draft_edit_checklist_operations_match_typescript() {
+    let expected_fixture = Fixture::new();
+    let actual_fixture = Fixture::new();
+    for fixture in [&expected_fixture, &actual_fixture] {
+        fixture.file(
+            "backlog/drafts/draft-1-checklists.md",
+            "---\nid: draft-1\ntitle: Checklist draft\nstatus: Draft\ncreated_date: 2026-01-01\n---\n## Acceptance Criteria\n\n- [ ] Preserve checked state.\n\n## Definition of Done\n\n- [ ] Keep unmanaged text.\n",
+        );
+    }
+    let args = [
+        "draft",
+        "edit",
+        "draft-1",
+        "--check-ac",
+        "1",
+        "--uncheck-dod",
+        "1",
+        "--plain",
+    ];
+    let expected = typescript_cli(&args, &expected_fixture.0);
+    let actual = rust_cli(&args, &actual_fixture.0);
+    assert_eq!(actual.status.code(), expected.status.code());
+    assert_eq!(
+        String::from_utf8_lossy(&actual.stdout)
+            .replace(&actual_fixture.0.to_string_lossy().to_string(), "<ROOT>"),
+        String::from_utf8_lossy(&expected.stdout)
+            .replace(&expected_fixture.0.to_string_lossy().to_string(), "<ROOT>")
+    );
+    assert_eq!(actual.stderr, expected.stderr);
+    let actual = backlog_md::records::parse_task(
+        &std::fs::read_to_string(
+            actual_fixture
+                .0
+                .join("backlog/drafts/draft-1 - Checklist-draft.md"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let expected = backlog_md::records::parse_task(
+        &std::fs::read_to_string(
+            expected_fixture
+                .0
+                .join("backlog/drafts/draft-1 - Checklist-draft.md"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(actual, expected);
+    assert!(actual.acceptance_criteria_items[0].checked);
+    assert!(!actual.definition_of_done_items[0].checked);
+}
+
+#[test]
+fn rust_draft_edit_frontmatter_drift_matches_typescript_without_mutation() {
+    let expected_fixture = Fixture::new();
+    let actual_fixture = Fixture::new();
+    for fixture in [&expected_fixture, &actual_fixture] {
+        fixture.file(
+            "backlog/drafts/draft-1-drifted.md",
+            "---\nid: draft-99\ntitle: Drifted draft\nstatus: Draft\ncreated_date: 2026-01-01\n---\nDo not change this file.\n",
+        );
+    }
+    let before =
+        std::fs::read(expected_fixture.0.join("backlog/drafts/draft-1-drifted.md")).unwrap();
+    let args = ["draft", "edit", "draft-1", "--title", "Changed"];
+    let expected = typescript_cli(&args, &expected_fixture.0);
+    let actual = rust_cli(&args, &actual_fixture.0);
+    assert_eq!(actual.status.code(), expected.status.code());
+    assert_eq!(actual.stdout, expected.stdout);
+    assert_eq!(
+        String::from_utf8_lossy(&actual.stderr)
+            .replace(&actual_fixture.0.to_string_lossy().to_string(), "<ROOT>"),
+        String::from_utf8_lossy(&expected.stderr)
+            .replace(&expected_fixture.0.to_string_lossy().to_string(), "<ROOT>")
+    );
+    assert_eq!(
+        std::fs::read(expected_fixture.0.join("backlog/drafts/draft-1-drifted.md")).unwrap(),
+        before
+    );
+    assert_eq!(
+        std::fs::read(actual_fixture.0.join("backlog/drafts/draft-1-drifted.md")).unwrap(),
+        before
+    );
+}
+
+#[test]
+fn rust_draft_edit_parse_failure_matches_typescript_without_mutation() {
+    let expected_fixture = Fixture::new();
+    let actual_fixture = Fixture::new();
+    for fixture in [&expected_fixture, &actual_fixture] {
+        fixture.file(
+            "backlog/drafts/draft-1-broken.md",
+            "---\nid: [unclosed\ntitle: Broken draft\nstatus: Draft\n---\nOriginal bytes.\n",
+        );
+    }
+    let path = "backlog/drafts/draft-1-broken.md";
+    let before = std::fs::read(expected_fixture.0.join(path)).unwrap();
+    let args = ["draft", "edit", "draft-1", "--title", "Changed"];
+    let expected = typescript_cli(&args, &expected_fixture.0);
+    let actual = rust_cli(&args, &actual_fixture.0);
+    assert_eq!(actual.status.code(), expected.status.code());
+    assert_eq!(actual.stdout, expected.stdout);
+    assert_eq!(
+        String::from_utf8_lossy(&actual.stderr)
+            .replace(&actual_fixture.0.to_string_lossy().to_string(), "<ROOT>"),
+        String::from_utf8_lossy(&expected.stderr)
+            .replace(&expected_fixture.0.to_string_lossy().to_string(), "<ROOT>")
+    );
+    assert_eq!(
+        std::fs::read(expected_fixture.0.join(path)).unwrap(),
+        before
+    );
+    assert_eq!(std::fs::read(actual_fixture.0.join(path)).unwrap(), before);
+}
+
+#[test]
+fn rust_draft_edit_checklist_errors_use_draft_guidance() {
+    let expected_fixture = Fixture::new();
+    let actual_fixture = Fixture::new();
+    for fixture in [&expected_fixture, &actual_fixture] {
+        fixture.file(
+            "backlog/drafts/draft-1-first.md",
+            "---\nid: draft-1\ntitle: First draft\nstatus: Draft\ncreated_date: 2026-01-01\n---\n",
+        );
+    }
+    let args = ["draft", "edit", "draft-1", "--check-ac", "7"];
+    let expected = typescript_cli(&args, &expected_fixture.0);
+    let actual = rust_cli(&args, &actual_fixture.0);
+    assert_eq!(actual.status.code(), expected.status.code());
+    assert_eq!(actual.stdout, expected.stdout);
+    assert_eq!(
+        String::from_utf8_lossy(&actual.stderr)
+            .replace(&actual_fixture.0.to_string_lossy().to_string(), "<ROOT>"),
+        String::from_utf8_lossy(&expected.stderr)
+            .replace(&expected_fixture.0.to_string_lossy().to_string(), "<ROOT>")
+    );
+}
+
+#[test]
+fn rust_draft_view_and_edit_identity_errors_match_typescript() {
+    let expected_fixture = Fixture::new();
+    let actual_fixture = Fixture::new();
+    for fixture in [&expected_fixture, &actual_fixture] {
+        fixture.file(
+            "backlog/drafts/draft-1-alpha.md",
+            "---\nid: draft-1\ntitle: Alpha\nstatus: Draft\ncreated_date: 2026-01-01\n---\n",
+        );
+        fixture.file(
+            "backlog/drafts/draft-01-beta.md",
+            "---\nid: draft-01\ntitle: Beta\nstatus: Draft\ncreated_date: 2026-01-02\n---\n",
+        );
+    }
+
+    for args in [
+        &["draft", "view", "1", "--plain"][..],
+        &["draft", "edit", "1", "--title", "Changed"][..],
+        &["draft", "view", "DRAFT-99", "--plain"][..],
+        &["draft", "edit", "DRAFT-99", "--title", "Changed"][..],
+    ] {
+        let expected = typescript_cli(args, &expected_fixture.0);
+        let actual = rust_cli(args, &actual_fixture.0);
+        assert_eq!(actual.status.code(), expected.status.code(), "{args:?}");
+        assert_eq!(actual.stdout, expected.stdout, "{args:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&actual.stderr)
+                .replace(&actual_fixture.0.to_string_lossy().to_string(), "<ROOT>"),
+            String::from_utf8_lossy(&expected.stderr)
+                .replace(&expected_fixture.0.to_string_lossy().to_string(), "<ROOT>"),
+            "{args:?}"
+        );
+    }
+}
+
+#[test]
 fn rust_draft_list_matches_typescript_for_plain_json_and_windows() {
     let empty = Fixture::new();
     std::fs::create_dir_all(empty.0.join("backlog/drafts")).unwrap();

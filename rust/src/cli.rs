@@ -8,7 +8,7 @@ use crate::{
     identity::{canonical_task_id, normalize_task_id, task_ids_equal},
     milestone_store::MilestoneStore,
     records::TaskRecord,
-    sections::{ChecklistKind, Criterion},
+    sections::{ChecklistKind, Comment, Criterion, SectionKey},
     task_detail::{TaskDetail, build_task_detail},
     task_filtering::{LabelMatch, TaskFilter},
     task_list::{TaskListItem, with_readiness},
@@ -42,7 +42,12 @@ enum Command {
     /// Draft commands.
     Draft {
         #[command(subcommand)]
-        command: DraftCommand,
+        command: Option<DraftCommand>,
+        /// Draft ID shorthand; equivalent to `draft view <draftId>`.
+        task_id: Option<String>,
+        /// Use human-readable output for the draft ID shorthand.
+        #[arg(long)]
+        plain: bool,
     },
 }
 
@@ -52,6 +57,21 @@ enum DraftCommand {
     List(DraftListArgs),
     /// Create a local draft.
     Create(DraftCreateArgs),
+    /// Display one draft's details.
+    View {
+        task_id: String,
+        #[command(flatten)]
+        options: DraftViewArgs,
+    },
+    /// Edit one local draft.
+    Edit(Box<TaskEditArgs>),
+}
+
+#[derive(Debug, Args)]
+struct DraftViewArgs {
+    /// Use human-readable output.
+    #[arg(long)]
+    plain: bool,
 }
 
 #[derive(Debug, Args)]
@@ -204,8 +224,42 @@ struct TaskEditArgs {
     /// Replacement description.
     #[arg(short, long, visible_alias = "desc")]
     description: Option<String>,
+    /// Replace the implementation plan.
+    #[arg(long)]
+    plan: Option<String>,
+    /// Append implementation plan text; repeat for multiple blocks.
+    #[arg(long = "append-plan", action = ArgAction::Append)]
+    append_plan: Vec<String>,
+    /// Replace implementation notes.
+    #[arg(long)]
+    notes: Option<String>,
+    /// Append implementation notes; repeat for multiple blocks.
+    #[arg(long = "append-notes", action = ArgAction::Append)]
+    append_notes: Vec<String>,
+    /// Append a comment; repeat for multiple comments.
+    #[arg(long, action = ArgAction::Append)]
+    comment: Vec<String>,
+    /// Author to record on appended comments.
+    #[arg(long)]
+    comment_author: Option<String>,
+    /// Replace the final summary.
+    #[arg(long)]
+    final_summary: Option<String>,
+    /// Append final summary text; repeat for multiple blocks.
+    #[arg(long = "append-final-summary", action = ArgAction::Append)]
+    append_final_summary: Vec<String>,
+    /// Remove the final summary.
+    #[arg(long)]
+    clear_final_summary: bool,
+    /// Replace modified file paths; repeat or comma-separate values.
+    #[arg(long = "modified-file", value_delimiter = ',', action = ArgAction::Append)]
+    modified_files: Option<Vec<String>>,
     /// Replacement status.
-    #[arg(short, long)]
+    #[arg(
+        short,
+        long,
+        help = "Replacement status; draft edits only accept Draft."
+    )]
     status: Option<String>,
     /// Replace all assignees; repeat or comma-separate values.
     #[arg(short, long, value_delimiter = ',', action = ArgAction::Append)]
@@ -376,6 +430,18 @@ struct ProjectContext {
     prefix: String,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EditTarget {
+    Task,
+    Draft,
+}
+
+#[derive(Clone, Debug)]
+struct EditableRecord {
+    task: TaskRecord,
+    path: PathBuf,
+}
+
 pub fn run() -> Result<(), String> {
     let cli = Cli::parse();
     match cli.command {
@@ -401,11 +467,31 @@ pub fn run() -> Result<(), String> {
             command: TaskCommand::Delete { task_id },
         } => run_task_delete(&task_id),
         Command::Draft {
-            command: DraftCommand::List(options),
+            command: Some(DraftCommand::List(options)),
+            ..
         } => run_draft_list(options),
         Command::Draft {
-            command: DraftCommand::Create(options),
+            command: Some(DraftCommand::Create(options)),
+            ..
         } => run_draft_create(options),
+        Command::Draft {
+            command: Some(DraftCommand::View { task_id, options }),
+            ..
+        } => run_draft_view(&task_id, options),
+        Command::Draft {
+            command: Some(DraftCommand::Edit(options)),
+            ..
+        } => run_draft_edit(*options),
+        Command::Draft {
+            command: None,
+            task_id: Some(task_id),
+            plain: _,
+        } => run_draft_view(&task_id, DraftViewArgs { plain: true }),
+        Command::Draft {
+            command: None,
+            task_id: None,
+            ..
+        } => Err("Usage: backlog draft <command> or backlog draft <draftId>".into()),
     }
 }
 
@@ -756,8 +842,17 @@ fn run_task_create(options: TaskCreateArgs) -> Result<(), String> {
 }
 
 fn run_task_edit(options: TaskEditArgs) -> Result<(), String> {
+    run_record_edit(options, EditTarget::Task)
+}
+
+fn run_draft_edit(options: TaskEditArgs) -> Result<(), String> {
+    run_record_edit(options, EditTarget::Draft)
+}
+
+fn run_record_edit(options: TaskEditArgs, target: EditTarget) -> Result<(), String> {
     let checklist_options = options.clone();
     let context = project_context()?;
+    let draft_store = DraftStore::new(&context.root, &context.backlog_directory);
     validate_task_edit_list_options(&options)?;
     if options.clear_due_date && options.due_date.is_some() {
         return Err(
@@ -792,26 +887,73 @@ fn run_task_edit(options: TaskEditArgs) -> Result<(), String> {
         ));
     }
 
-    let entry = context
-        .store
-        .load_task(&options.task_id)
-        .map_err(|error| format!("{}\nNo changes were applied.", error))?;
+    let entry = match target {
+        EditTarget::Task => context
+            .store
+            .load_task(&options.task_id)
+            .map_err(|error| format!("{}\nNo changes were applied.", error))?
+            .map(|entry| EditableRecord {
+                task: entry.task,
+                path: entry.path,
+            }),
+        EditTarget::Draft => {
+            let path = draft_store
+                .resolve_path(&options.task_id)
+                .map_err(|error| format!("{error}\nNo changes were applied."))?;
+            match path {
+                None => None,
+                Some(path) => match draft_store.read_entry(&path) {
+                    Ok(entry) => Some(EditableRecord {
+                        task: entry.task,
+                        path: entry.path,
+                    }),
+                    Err(crate::draft_store::DraftStoreError::Serialization(_)) => {
+                        return Err(format!(
+                            "Draft file {} could not be parsed. Repair or remove the file, then rerun the edit.\nNo changes were applied.",
+                            path.file_name().unwrap_or_default().to_string_lossy()
+                        ));
+                    }
+                    Err(error) => {
+                        return Err(format!("{error}\nNo changes were applied."));
+                    }
+                },
+            }
+        }
+    };
     let Some(entry) = entry else {
-        let archived = context.store.list_archived_tasks();
-        if let Some(candidate) = archived
-            .iter()
-            .find(|candidate| task_ids_equal(&options.task_id, &candidate.task.id, &context.prefix))
-        {
+        if target == EditTarget::Task {
+            let archived = context.store.list_archived_tasks();
+            if let Some(candidate) = archived.iter().find(|candidate| {
+                task_ids_equal(&options.task_id, &candidate.task.id, &context.prefix)
+            }) {
+                return Err(format!(
+                    "{}\nNo changes were applied.",
+                    crate::task_store::TaskStoreError::Archived(candidate.task.id.clone())
+                ));
+            }
             return Err(format!(
-                "{}\nNo changes were applied.",
-                crate::task_store::TaskStoreError::Archived(candidate.task.id.clone())
+                "Task {} not found. Task lookups read only the local working copy; use 'backlog browser' to see tasks from other branches.\nNo changes were applied.",
+                options.task_id
             ));
         }
         return Err(format!(
-            "Task {} not found. Task lookups read only the local working copy; use 'backlog browser' to see tasks from other branches.\nNo changes were applied.",
+            "Draft {} not found.\nNo changes were applied.",
             options.task_id
         ));
     };
+    if target == EditTarget::Draft {
+        let filename_id = draft_store
+            .filename_id(&entry.path)
+            .map_err(|error| format!("{error}\nNo changes were applied."))?;
+        if !task_ids_equal(&entry.task.id, &filename_id, "draft") {
+            return Err(format!(
+                "Draft file {} declares frontmatter id {}, which does not match its filename id {}. Fix the frontmatter id or rename the file so they agree, then rerun the edit.\nNo changes were applied.",
+                entry.path.file_name().unwrap_or_default().to_string_lossy(),
+                canonical_task_id(&entry.task.id, "draft"),
+                canonical_task_id(&filename_id, "draft")
+            ));
+        }
+    }
 
     let mut updated = entry.task.clone();
     if let Some(title) = options.title.filter(|title| !title.is_empty()) {
@@ -825,13 +967,21 @@ fn run_task_edit(options: TaskEditArgs) -> Result<(), String> {
         updated.description = description;
     }
     if let Some(status) = options.status.filter(|status| !status.trim().is_empty()) {
-        updated.status =
-            resolve_config_value(&status, &context.config.statuses).ok_or_else(|| {
+        if target == EditTarget::Draft {
+            if !status.trim().eq_ignore_ascii_case("Draft") {
+                return Err(format!(
+                    "Invalid status: {status}. Valid statuses are: Draft\nNo changes were applied."
+                ));
+            }
+            updated.status = "Draft".into();
+        } else {
+            updated.status = resolve_config_value(&status, &context.config.statuses).ok_or_else(|| {
                 format!(
                     "Invalid status: {status}. Valid statuses are: {}\nNo changes were applied.",
                     context.config.statuses.join(", ")
                 )
             })?;
+        }
     }
     if let Some(assignee) = options.assignee {
         updated.assignee = normalized_create_values(assignee);
@@ -976,39 +1126,170 @@ fn run_task_edit(options: TaskEditArgs) -> Result<(), String> {
             .documentation
             .retain(|document| !removals.contains(document));
     }
-    apply_checklist_options(&mut updated, &entry.task.raw_content, &checklist_options)?;
+
+    for (value, key) in [
+        (options.plan.as_deref(), SectionKey::ImplementationPlan),
+        (options.notes.as_deref(), SectionKey::ImplementationNotes),
+        (options.final_summary.as_deref(), SectionKey::FinalSummary),
+    ] {
+        if let Some(value) = value {
+            crate::sections::assert_section_input_safe(value, key)
+                .map_err(|error| format!("{error}\nNo changes were applied."))?;
+        }
+    }
+    for (values, key) in [
+        (&options.append_plan, SectionKey::ImplementationPlan),
+        (&options.append_notes, SectionKey::ImplementationNotes),
+        (&options.append_final_summary, SectionKey::FinalSummary),
+    ] {
+        for value in values {
+            crate::sections::assert_section_input_safe(value, key)
+                .map_err(|error| format!("{error}\nNo changes were applied."))?;
+        }
+    }
+    if let Some(plan) = options.plan {
+        set_optional_text(&mut updated.implementation_plan, plan);
+    }
+    append_text_blocks(&mut updated.implementation_plan, &options.append_plan);
+    if let Some(notes) = options.notes {
+        set_optional_text(&mut updated.implementation_notes, notes);
+    }
+    append_text_blocks(&mut updated.implementation_notes, &options.append_notes);
+    if !options.comment.is_empty() {
+        let author = options
+            .comment_author
+            .as_deref()
+            .map(|value| value.split_whitespace().collect::<Vec<_>>().join(" "))
+            .filter(|value| !value.is_empty());
+        if let Some(author) = author.as_deref() {
+            validate_comment_field(author, "Comment author")?;
+        }
+        let mut comments = updated.comments.clone();
+        let mut next_index = comments
+            .iter()
+            .map(|comment| comment.index)
+            .max()
+            .unwrap_or(0)
+            + 1;
+        let created_date = crate::task_store::utc_timestamp();
+        for body in &options.comment {
+            let body = body.replace("\r\n", "\n").trim().to_owned();
+            if body.is_empty() {
+                continue;
+            }
+            validate_comment_field(&body, "Comment body")?;
+            comments.push(Comment {
+                index: next_index,
+                body,
+                created_date: created_date.clone(),
+                author: author.clone(),
+            });
+            next_index += 1;
+        }
+        updated.comments = comments;
+    }
+    if options.clear_final_summary && updated.final_summary.is_some() {
+        updated.final_summary = Some(String::new());
+    }
+    if let Some(summary) = options.final_summary {
+        set_optional_text(&mut updated.final_summary, summary);
+    }
+    append_text_blocks(&mut updated.final_summary, &options.append_final_summary);
+    if let Some(modified_files) = options.modified_files {
+        let modified_files = normalized_delimited_create_values(modified_files);
+        if !modified_files.is_empty() {
+            updated.modified_files = modified_files;
+        }
+    }
+    apply_checklist_options(
+        &mut updated,
+        &entry.task.raw_content,
+        &checklist_options,
+        if target == EditTarget::Task {
+            "task"
+        } else {
+            "draft"
+        },
+        &canonical_task_id(
+            &entry.task.id,
+            if target == EditTarget::Task {
+                &context.prefix
+            } else {
+                "draft"
+            },
+        ),
+    )?;
 
     let updated_entry = if updated != entry.task {
         updated.updated_date = Some(crate::task_store::utc_timestamp());
-        let updated_entry = context
-            .store
-            .update_task(updated)
-            .map_err(|error| {
-                format!(
-                    "{}\nNo changes were applied.",
-                    task_edit_store_error(error, &entry.task.id, &context.prefix)
-                )
-            })?
-            .ok_or_else(|| {
-                format!(
-                    "Task {} not found. Task lookups read only the local working copy; use 'backlog browser' to see tasks from other branches.\nNo changes were applied.",
-                    options.task_id
-                )
-            })?;
+        let updated_entry = match target {
+            EditTarget::Task => context
+                .store
+                .update_task(updated)
+                .map_err(|error| {
+                    format!(
+                        "{}\nNo changes were applied.",
+                        task_edit_store_error(error, &entry.task.id, &context.prefix)
+                    )
+                })?
+                .map(|entry| EditableRecord {
+                    task: entry.task,
+                    path: entry.path,
+                }),
+            EditTarget::Draft => draft_store
+                .update_draft(updated)
+                .map_err(|error| format!("{error}\nNo changes were applied."))?
+                .map(|entry| EditableRecord {
+                    task: entry.task,
+                    path: entry.path,
+                }),
+        }
+        .ok_or_else(|| match target {
+            EditTarget::Task => format!(
+                "Task {} not found. Task lookups read only the local working copy; use 'backlog browser' to see tasks from other branches.\nNo changes were applied.",
+                options.task_id
+            ),
+            EditTarget::Draft => format!(
+                "Draft {} not found.\nNo changes were applied.",
+                options.task_id
+            ),
+        })?;
+        let selected_paths = if entry.path == updated_entry.path {
+            vec![updated_entry.path.clone()]
+        } else {
+            vec![entry.path.clone(), updated_entry.path.clone()]
+        };
         commit_record_change(
             &context,
             &format!(
-                "Update task {}",
-                canonical_task_id(&updated_entry.task.id, &context.prefix)
+                "Update {} {}",
+                if target == EditTarget::Task {
+                    "task"
+                } else {
+                    "draft"
+                },
+                canonical_task_id(
+                    &updated_entry.task.id,
+                    if target == EditTarget::Task {
+                        &context.prefix
+                    } else {
+                        "draft"
+                    }
+                )
             ),
-            std::slice::from_ref(&updated_entry.path),
+            &selected_paths,
         )?;
         updated_entry
     } else {
         entry
     };
     let mut updated_task = updated_entry.task;
-    updated_task.id = canonical_task_id(&updated_task.id, &context.prefix);
+    let id_prefix = if target == EditTarget::Task {
+        &context.prefix
+    } else {
+        "draft"
+    };
+    updated_task.id = canonical_task_id(&updated_task.id, id_prefix);
     if options.plain {
         let active = context
             .store
@@ -1043,7 +1324,15 @@ fn run_task_edit(options: TaskEditArgs) -> Result<(), String> {
             )
         ));
     }
-    write_stdout(&format!("Updated task {}\n", updated_task.id))
+    write_stdout(&format!(
+        "Updated {} {}\n",
+        if target == EditTarget::Task {
+            "task"
+        } else {
+            "draft"
+        },
+        updated_task.id
+    ))
 }
 
 fn validate_task_edit_list_options(options: &TaskEditArgs) -> Result<(), String> {
@@ -1139,14 +1428,18 @@ fn validate_task_edit_list_options(options: &TaskEditArgs) -> Result<(), String>
     Ok(())
 }
 
-fn checklist_indices(values: &[String], task_id: &str) -> Result<Vec<usize>, String> {
+fn checklist_indices(
+    values: &[String],
+    command_kind: &str,
+    task_id: &str,
+) -> Result<Vec<usize>, String> {
     values
         .iter()
         .map(|value| {
             let index = value.parse::<usize>().ok().filter(|index| *index > 0);
             index.ok_or_else(|| {
                 format!(
-                    "Invalid index: {value}. Index must be a positive number (1-based). Try 'backlog task edit {task_id} --help' for index options.\nNo changes were applied."
+                    "Invalid index: {value}. Index must be a positive number (1-based). Try 'backlog {command_kind} edit {task_id} --help' for index options.\nNo changes were applied."
                 )
             })
         })
@@ -1157,6 +1450,8 @@ fn apply_checklist_options(
     task: &mut TaskRecord,
     original_body: &str,
     options: &TaskEditArgs,
+    command_kind: &str,
+    task_id: &str,
 ) -> Result<(), String> {
     let ac_touched = options.acceptance_criteria.is_some()
         || options.clear_ac
@@ -1176,7 +1471,9 @@ fn apply_checklist_options(
             original_body,
             ChecklistKind::AcceptanceCriteria,
         )
-        .map_err(|error| format!("{error}\nNo changes were applied."))?;
+        .map_err(|error| {
+            format_malformed_checklist_error(&error.to_string(), command_kind, task_id)
+        })?;
     }
     if !options.remove_dod.is_empty()
         || !options.check_dod.is_empty()
@@ -1186,7 +1483,9 @@ fn apply_checklist_options(
             original_body,
             ChecklistKind::DefinitionOfDone,
         )
-        .map_err(|error| format!("{error}\nNo changes were applied."))?;
+        .map_err(|error| {
+            format_malformed_checklist_error(&error.to_string(), command_kind, task_id)
+        })?;
     }
     if ac_touched {
         let mut criteria = task.acceptance_criteria_items.clone();
@@ -1224,14 +1523,18 @@ fn apply_checklist_options(
                 }),
         );
         reindex_criteria(&mut criteria);
-        let removals = checklist_indices(&options.remove_ac, &options.task_id.to_uppercase())?;
+        let removals = checklist_indices(&options.remove_ac, command_kind, task_id)?;
         if !removals.is_empty() {
             let before = criteria.len();
             criteria.retain(|item| !removals.contains(&item.index));
             if before == criteria.len() {
-                return Err(format!(
-                    "Acceptance criterion #{} not found.\nNo changes were applied.",
-                    removals[0]
+                return Err(missing_checklist_index_error(
+                    "Acceptance criterion",
+                    &removals,
+                    &criteria,
+                    "No acceptance criteria are defined.",
+                    command_kind,
+                    task_id,
                 ));
             }
             reindex_criteria(&mut criteria);
@@ -1241,14 +1544,18 @@ fn apply_checklist_options(
             &options.check_ac,
             true,
             "Acceptance criterion",
-            &options.task_id.to_uppercase(),
+            command_kind,
+            task_id,
+            "No acceptance criteria are defined.",
         )?;
         apply_check_state(
             &mut criteria,
             &options.uncheck_ac,
             false,
             "Acceptance criterion",
-            &options.task_id.to_uppercase(),
+            command_kind,
+            task_id,
+            "No acceptance criteria are defined.",
         )?;
         task.acceptance_criteria_items = criteria;
     }
@@ -1269,23 +1576,31 @@ fn apply_checklist_options(
             &options.check_dod,
             true,
             "Definition of Done item",
-            &options.task_id.to_uppercase(),
+            command_kind,
+            task_id,
+            "No Definition of Done items are defined.",
         )?;
         apply_check_state(
             &mut criteria,
             &options.uncheck_dod,
             false,
             "Definition of Done item",
-            &options.task_id.to_uppercase(),
+            command_kind,
+            task_id,
+            "No Definition of Done items are defined.",
         )?;
-        let removals = checklist_indices(&options.remove_dod, &options.task_id.to_uppercase())?;
+        let removals = checklist_indices(&options.remove_dod, command_kind, task_id)?;
         if !removals.is_empty() {
             let before = criteria.len();
             criteria.retain(|item| !removals.contains(&item.index));
             if before == criteria.len() {
-                return Err(format!(
-                    "Definition of Done item #{} not found.\nNo changes were applied.",
-                    removals[0]
+                return Err(missing_checklist_index_error(
+                    "Definition of Done item",
+                    &removals,
+                    &criteria,
+                    "No Definition of Done items are defined.",
+                    command_kind,
+                    task_id,
                 ));
             }
             reindex_criteria(&mut criteria);
@@ -1306,17 +1621,76 @@ fn apply_check_state(
     values: &[String],
     checked: bool,
     name: &str,
+    command_kind: &str,
     task_id: &str,
+    empty_hint: &str,
 ) -> Result<(), String> {
-    for index in checklist_indices(values, task_id)? {
+    let indices = checklist_indices(values, command_kind, task_id)?;
+    let mut missing = Vec::new();
+    for index in indices {
         let Some(item) = criteria.iter_mut().find(|item| item.index == index) else {
-            return Err(format!(
-                "{name} #{index} not found.\nNo changes were applied."
-            ));
+            missing.push(index);
+            continue;
         };
         item.checked = checked;
     }
+    if !missing.is_empty() {
+        return Err(missing_checklist_index_error(
+            name,
+            &missing,
+            criteria,
+            empty_hint,
+            command_kind,
+            task_id,
+        ));
+    }
     Ok(())
+}
+
+fn missing_checklist_index_error(
+    name: &str,
+    missing: &[usize],
+    available: &[Criterion],
+    empty_hint: &str,
+    command_kind: &str,
+    task_id: &str,
+) -> String {
+    let missing = missing
+        .iter()
+        .map(|index| format!("#{index}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    if command_kind == "task" {
+        return format!("{name} {missing} not found.\nNo changes were applied.");
+    }
+    let hint = if available.is_empty() {
+        empty_hint.to_owned()
+    } else {
+        let first = available.iter().map(|item| item.index).min().unwrap_or(1);
+        let last = available
+            .iter()
+            .map(|item| item.index)
+            .max()
+            .unwrap_or(first);
+        let range = if first == last {
+            format!("#{first}")
+        } else {
+            format!("#{first}-#{last}")
+        };
+        format!("Available indexes: {range}.")
+    };
+    format!(
+        "{name} {missing} not found. {hint}\nRun 'backlog {command_kind} view {task_id} --plain' to inspect indexes, or 'backlog {command_kind} edit {task_id} --help' for edit options.\nNo changes were applied."
+    )
+}
+
+fn format_malformed_checklist_error(error: &str, command_kind: &str, task_id: &str) -> String {
+    if command_kind == "task" {
+        return format!("{error}\nNo changes were applied.");
+    }
+    format!(
+        "{error}\nRun 'backlog draft view {task_id} --plain' to locate the draft file, repair or remove the malformed marker block in that Markdown file, then rerun the edit.\nNo changes were applied."
+    )
 }
 
 fn task_edit_store_error(
@@ -1516,6 +1890,50 @@ fn normalized_create_values(values: Vec<String>) -> Vec<String> {
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
         .collect()
+}
+
+fn set_optional_text(field: &mut Option<String>, value: String) {
+    if field.as_deref().unwrap_or_default() != value {
+        *field = Some(value);
+    }
+}
+
+fn append_text_blocks(field: &mut Option<String>, values: &[String]) {
+    let additions = values
+        .iter()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+    if additions.is_empty() {
+        return;
+    }
+    let current = field.as_deref().unwrap_or_default().trim();
+    let addition = additions.join("\n\n");
+    *field = Some(if current.is_empty() {
+        addition
+    } else {
+        format!("{current}\n\n{addition}")
+    });
+}
+
+fn validate_comment_field(value: &str, field: &str) -> Result<(), String> {
+    if value.to_ascii_lowercase().contains("<!-- comment:")
+        || value.to_ascii_lowercase().contains("<!-- comments:")
+    {
+        return Err(format!(
+            "{field} cannot contain Backlog comment markers.\nNo changes were applied."
+        ));
+    }
+    if value
+        .replace("\r\n", "\n")
+        .lines()
+        .any(|line| line.trim() == "---")
+    {
+        return Err(format!(
+            "{field} cannot contain standalone '---' delimiter lines.\nNo changes were applied."
+        ));
+    }
+    Ok(())
 }
 
 fn normalized_delimited_create_values(values: Vec<String>) -> Vec<String> {
@@ -1757,6 +2175,51 @@ fn run_draft_list(options: DraftListArgs) -> Result<(), String> {
         write_stdout(&footer)?;
     }
     Ok(())
+}
+
+fn run_draft_view(task_id: &str, options: DraftViewArgs) -> Result<(), String> {
+    let _ = options.plain;
+    let context = project_context()?;
+    let store = DraftStore::new(&context.root, &context.backlog_directory);
+    let entry = store
+        .load_draft(task_id)
+        .map_err(|error| error.to_string())?;
+    let Some(entry) = entry else {
+        return write_stderr(&format!("Draft {task_id} not found.\n"));
+    };
+    let mut draft = entry.task.clone();
+    draft.id = canonical_task_id(&draft.id, "draft");
+    let active_entries = context.store.list_tasks();
+    let active = active_entries
+        .iter()
+        .map(|entry| entry.task.clone())
+        .collect::<Vec<_>>();
+    let archived = context
+        .store
+        .list_archived_tasks()
+        .into_iter()
+        .map(|entry| entry.task)
+        .collect::<Vec<_>>();
+    let detail = build_task_detail(
+        &draft,
+        &active,
+        &archived,
+        &context.config.statuses,
+        &[],
+        &context.prefix,
+    );
+    write_stdout(&format!(
+        "{}\n",
+        format_task_detail(
+            &detail,
+            &entry.path,
+            false,
+            &active,
+            &context.config,
+            &context.prefix,
+            true,
+        )
+    ))
 }
 
 fn run_draft_create(options: DraftCreateArgs) -> Result<(), String> {
@@ -2809,6 +3272,13 @@ fn write_json(value: &Value) -> Result<(), String> {
 
 fn write_stdout(value: &str) -> Result<(), String> {
     io::stdout()
+        .lock()
+        .write_all(value.as_bytes())
+        .map_err(|error| error.to_string())
+}
+
+fn write_stderr(value: &str) -> Result<(), String> {
+    io::stderr()
         .lock()
         .write_all(value.as_bytes())
         .map_err(|error| error.to_string())
