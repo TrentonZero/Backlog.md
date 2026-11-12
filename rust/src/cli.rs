@@ -70,6 +70,8 @@ enum Command {
 enum DocCommand {
     /// Create a document.
     Create(DocCreateArgs),
+    /// Update a document.
+    Update(DocUpdateArgs),
     /// List documents in the configured docs directory.
     List(DocListArgs),
     /// Display a document's Markdown content.
@@ -93,6 +95,27 @@ struct DocCreateArgs {
     /// Use human-readable text output.
     #[arg(long)]
     plain: bool,
+}
+
+#[derive(Debug, Args)]
+struct DocUpdateArgs {
+    /// Document ID.
+    document_id: String,
+    /// Replace the document title.
+    #[arg(long)]
+    title: Option<String>,
+    /// Replace the document's Markdown body.
+    #[arg(long)]
+    content: Option<String>,
+    /// Move the document under a docs-relative path.
+    #[arg(short, long)]
+    path: Option<String>,
+    /// Replace the document type.
+    #[arg(short = 't', long = "type")]
+    document_type: Option<String>,
+    /// Replace tags (comma-separated; repeatable).
+    #[arg(long, value_delimiter = ',', action = ArgAction::Append)]
+    tags: Option<Vec<String>>,
 }
 
 #[derive(Debug, Args)]
@@ -637,6 +660,9 @@ pub fn run() -> Result<(), String> {
         Command::Doc {
             command: DocCommand::Create(options),
         } => run_document_create(options),
+        Command::Doc {
+            command: DocCommand::Update(options),
+        } => run_document_update(options),
         Command::Doc {
             command: DocCommand::List(options),
         } => run_document_list(options),
@@ -2479,6 +2505,113 @@ fn run_document_create(options: DocCreateArgs) -> Result<(), String> {
         "Created document {}\nPath: {backlog_directory}/docs/{relative_path}\n",
         entry.document.id
     ))
+}
+
+fn run_document_update(options: DocUpdateArgs) -> Result<(), String> {
+    let context = project_context()?;
+    let store = DocumentStore::new(&context.root, &context.backlog_directory, &context.prefix);
+    let entry = store
+        .load_document_for_view(&options.document_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("Document not found: {}", options.document_id))?;
+    if entry.archived {
+        return Err(
+            crate::document_store::DocumentStoreError::Archived(entry.document.id).to_string(),
+        );
+    }
+
+    let mut document = entry.document;
+    if let Some(title) = options.title {
+        let title = title.trim();
+        if title.is_empty() {
+            return Err("Document title cannot be empty.".into());
+        }
+        document.title = title.to_owned();
+    }
+    if let Some(document_type) = options.document_type {
+        if !["readme", "guide", "specification", "other"].contains(&document_type.as_str()) {
+            return Err(
+                "Document type must be one of: readme, guide, specification, other.".into(),
+            );
+        }
+        document.document_type = document_type;
+    }
+    if let Some(tags) = options.tags {
+        let mut tags = normalized_delimited_create_values(tags);
+        let mut seen = HashSet::new();
+        tags.retain(|tag| seen.insert(tag.clone()));
+        document.tags = (!tags.is_empty()).then_some(tags);
+    }
+    if let Some(content) = options.content {
+        document.raw_content = content;
+    }
+    document.updated_date = Some(crate::task_store::utc_timestamp());
+
+    let old_path = entry.path;
+    let updated = store
+        .update_document_at_path(document, options.path.as_deref())
+        .map_err(|error| error.to_string())?;
+    let message = format!("backlog: Add document {}", updated.document.id);
+    if context.config.auto_commit == Some(true) && context.config.filesystem_only != Some(true) {
+        let changed_paths = if old_path == updated.path {
+            vec![updated.path.clone()]
+        } else {
+            vec![old_path, updated.path.clone()]
+        };
+        if let Err(error) = commit_record_change(&context, &message, &changed_paths) {
+            return Err(document_update_commit_error(
+                error,
+                &context.root,
+                &updated.path,
+            ));
+        }
+    }
+
+    let docs_directory = context.root.join(&context.backlog_directory).join("docs");
+    let relative_path = updated
+        .path
+        .strip_prefix(docs_directory)
+        .map_err(|error| error.to_string())?
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/");
+    let backlog_directory = context
+        .backlog_directory
+        .to_string_lossy()
+        .replace('\\', "/");
+    write_stdout(&format!(
+        "Updated document {}\nPath: {backlog_directory}/docs/{relative_path}\n",
+        updated.document.id
+    ))
+}
+
+fn document_update_commit_error(
+    error: String,
+    project_root: &std::path::Path,
+    path: &std::path::Path,
+) -> String {
+    let Some((_, stage_error)) = error.split_once("Git stage selected files failed (exit code ")
+    else {
+        return error;
+    };
+    let Some((exit_code, command_and_stderr)) =
+        stage_error.split_once("). Command: git --literal-pathspecs add -A -- ")
+    else {
+        return error;
+    };
+    let Some((_, stderr)) = command_and_stderr.split_once('\n') else {
+        return error;
+    };
+    let Some(relative_path) = path.strip_prefix(project_root).ok() else {
+        return error;
+    };
+    let relative_path = relative_path
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/");
+    format!("Git command failed (exit code {exit_code}): git add {relative_path}\n{stderr}\n")
 }
 
 fn run_draft_view(task_id: &str, options: DraftViewArgs) -> Result<(), String> {

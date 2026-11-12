@@ -3160,20 +3160,213 @@ fn rust_document_view_matches_typescript_ids_archives_and_errors() {
     }
 }
 
-fn normalize_document_created_timestamp(source: &str) -> String {
+fn normalize_document_timestamps(source: &str) -> String {
     let mut in_frontmatter = false;
     let mut normalized = String::new();
     for line in source.split_inclusive('\n') {
         if line.trim_end_matches('\n') == "---" {
             in_frontmatter = !in_frontmatter;
         }
-        if in_frontmatter && line.starts_with("created_date:") {
-            normalized.push_str("created_date: <generated>\n");
+        if in_frontmatter
+            && (line.starts_with("created_date:") || line.starts_with("updated_date:"))
+        {
+            normalized.push_str(&format!(
+                "{}: <generated>\n",
+                line.split(':').next().unwrap()
+            ));
         } else {
             normalized.push_str(line);
         }
     }
     normalized
+}
+
+fn document_update_fixture() -> Fixture {
+    let fixture = fixture();
+    fixture.file(
+        "backlog/docs/guides/doc-1 - Setup-Guide.md",
+        "---\nid: doc-1\ntitle: Setup Guide\ntype: guide\ncreated_date: 2026-01-01\ntags:\n  - setup\ncustom_field: keep me\n---\n# Original body\n\nPreserve this text.\n",
+    );
+    fixture.file(
+        "backlog/archive/docs/doc-2 - Archived-Guide.md",
+        "---\nid: doc-2\ntitle: Archived Guide\ntype: guide\ncreated_date: 2026-01-01\n---\nArchived body.\n",
+    );
+    fixture
+}
+
+#[test]
+fn rust_document_update_matches_typescript_files_output_moves_and_refusals() {
+    let success_cases: [(&[&str], &str); 3] = [
+        (
+            &[
+                "doc",
+                "update",
+                "doc-1",
+                "--title",
+                "Install Runbook",
+                "--content",
+                "# Updated body\n\nRun install steps.",
+                "--type",
+                "specification",
+                "--tags",
+                "ops,runbook",
+                "--path",
+                "runbooks",
+            ],
+            "backlog/docs/runbooks/doc-1 - Install-Runbook.md",
+        ),
+        (
+            &["doc", "update", "doc-1", "--title", "Setup Handbook"],
+            "backlog/docs/guides/doc-1 - Setup-Handbook.md",
+        ),
+        (
+            &["doc", "update", "doc-1", "--tags", "ops,ops"],
+            "backlog/docs/guides/doc-1 - Setup-Guide.md",
+        ),
+    ];
+    for (args, relative_path) in success_cases {
+        let reference = document_update_fixture();
+        let candidate = document_update_fixture();
+        let expected = typescript_cli(args, &reference.0);
+        let actual = rust_cli(args, &candidate.0);
+        assert_eq!(
+            actual.status.code(),
+            expected.status.code(),
+            "args: {args:?}; rust stderr: {}",
+            String::from_utf8_lossy(&actual.stderr)
+        );
+        assert_eq!(actual.stdout, expected.stdout, "args: {args:?}");
+        assert_eq!(actual.stderr, expected.stderr, "args: {args:?}");
+        let expected_path = reference.0.join(relative_path);
+        let actual_path = candidate.0.join(relative_path);
+        assert_eq!(
+            normalize_document_timestamps(&std::fs::read_to_string(actual_path).unwrap()),
+            normalize_document_timestamps(&std::fs::read_to_string(expected_path).unwrap()),
+            "args: {args:?}"
+        );
+        if relative_path != "backlog/docs/guides/doc-1 - Setup-Guide.md" {
+            assert!(
+                !candidate
+                    .0
+                    .join("backlog/docs/guides/doc-1 - Setup-Guide.md")
+                    .exists(),
+                "old source remained after moving/renaming: {args:?}"
+            );
+        }
+    }
+
+    let absolute_path = std::env::temp_dir().join(format!(
+        "backlog-rust-doc-update-outside-{}-{}",
+        std::process::id(),
+        NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)
+    ));
+    let absolute_path = absolute_path.to_string_lossy().into_owned();
+    let refusal_cases = [
+        vec!["doc", "update", "doc-1", "--title", "  "],
+        vec!["doc", "update", "doc-1", "--type", "invalid"],
+        vec!["doc", "update", "doc-1", "--path", "../outside"],
+        vec!["doc", "update", "doc-1", "--path", &absolute_path],
+        vec!["doc", "update", "doc-404", "--content", "Nope"],
+        vec!["doc", "update", "doc-2", "--content", "Nope"],
+    ];
+    for args in refusal_cases {
+        let reference = document_update_fixture();
+        let candidate = document_update_fixture();
+        let original = std::fs::read_to_string(
+            candidate
+                .0
+                .join("backlog/docs/guides/doc-1 - Setup-Guide.md"),
+        )
+        .unwrap();
+        let archived_original = std::fs::read_to_string(
+            candidate
+                .0
+                .join("backlog/archive/docs/doc-2 - Archived-Guide.md"),
+        )
+        .unwrap();
+        let expected = typescript_cli(&args, &reference.0);
+        let actual = rust_cli(&args, &candidate.0);
+        assert_eq!(
+            actual.status.code(),
+            expected.status.code(),
+            "args: {args:?}"
+        );
+        assert_eq!(actual.stdout, expected.stdout, "args: {args:?}");
+        assert_eq!(actual.stderr, expected.stderr, "args: {args:?}");
+        assert_eq!(
+            std::fs::read_to_string(
+                candidate
+                    .0
+                    .join("backlog/docs/guides/doc-1 - Setup-Guide.md")
+            )
+            .unwrap(),
+            original,
+            "refused update changed source: {args:?}"
+        );
+        assert!(
+            !candidate.0.join("backlog/outside").exists(),
+            "refused update wrote outside docs: {args:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(
+                candidate
+                    .0
+                    .join("backlog/archive/docs/doc-2 - Archived-Guide.md")
+            )
+            .unwrap(),
+            archived_original,
+            "refused update changed archived source: {args:?}"
+        );
+    }
+    assert!(
+        !std::path::Path::new(&absolute_path).exists(),
+        "refused update wrote to the absolute path"
+    );
+}
+
+#[test]
+fn rust_document_update_retains_written_file_when_auto_commit_fails() {
+    let reference = document_update_fixture();
+    let candidate = document_update_fixture();
+    for fixture in [&reference, &candidate] {
+        fixture.file(
+            "backlog.config.yml",
+            "project_name: CLI Fixture\ntask_prefix: task\nstatuses:\n  - To Do\n  - Done\nauto_commit: true\n",
+        );
+        initialize_git_fixture(fixture);
+        std::fs::write(fixture.0.join(".git/index.lock"), "").unwrap();
+    }
+
+    let args = ["doc", "update", "doc-1", "--content", "# Applied update\n"];
+    let expected = typescript_cli(&args, &reference.0);
+    let actual = rust_cli(&args, &candidate.0);
+    assert_eq!(expected.status.code(), Some(1));
+    assert_eq!(actual.status.code(), Some(1));
+    assert!(expected.stdout.is_empty());
+    assert!(actual.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8_lossy(&actual.stderr)
+            .replace(&candidate.0.to_string_lossy().to_string(), "<ROOT>"),
+        String::from_utf8_lossy(&expected.stderr)
+            .replace(&reference.0.to_string_lossy().to_string(), "<ROOT>")
+    );
+
+    let relative_path = "backlog/docs/guides/doc-1 - Setup-Guide.md";
+    let expected_path = reference.0.join(relative_path);
+    let actual_path = candidate.0.join(relative_path);
+    assert!(
+        expected_path.exists(),
+        "TypeScript removed the applied update"
+    );
+    assert!(
+        actual_path.exists(),
+        "Rust removed the applied update after commit failure: {}",
+        String::from_utf8_lossy(&actual.stderr)
+    );
+    assert_eq!(
+        normalize_document_timestamps(&std::fs::read_to_string(actual_path).unwrap()),
+        normalize_document_timestamps(&std::fs::read_to_string(expected_path).unwrap())
+    );
 }
 
 #[test]
@@ -3218,8 +3411,8 @@ fn rust_document_create_matches_typescript_content_output_and_refusals() {
         let expected_markdown = std::fs::read_to_string(reference_path).unwrap();
         let actual_markdown = std::fs::read_to_string(candidate_path).unwrap();
         assert_eq!(
-            normalize_document_created_timestamp(&actual_markdown),
-            normalize_document_created_timestamp(&expected_markdown),
+            normalize_document_timestamps(&actual_markdown),
+            normalize_document_timestamps(&expected_markdown),
             "args: {args:?}"
         );
     }

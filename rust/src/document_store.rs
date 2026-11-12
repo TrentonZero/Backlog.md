@@ -224,7 +224,16 @@ impl DocumentStore {
     /// Update one document under its identity lock, preserving its source frontmatter and body.
     pub fn update_document(
         &self,
+        document: DocumentRecord,
+    ) -> Result<DocumentFileEntry, DocumentStoreError> {
+        self.update_document_at_path(document, None)
+    }
+
+    /// Update one document and optionally move it to another docs-relative subdirectory.
+    pub fn update_document_at_path(
+        &self,
         mut document: DocumentRecord,
+        requested_sub_path: Option<&str>,
     ) -> Result<DocumentFileEntry, DocumentStoreError> {
         let target = self
             .resolve_document(&document.id)?
@@ -261,13 +270,17 @@ impl DocumentStore {
         document.id = filename_id;
         let source = serialization::serialize_document(&document, &original)
             .map_err(|error| DocumentStoreError::Serialization(error.to_string()))?;
-        let sub_path = current
-            .path
-            .strip_prefix(&self.docs_directory)
-            .ok()
-            .and_then(Path::parent)
-            .unwrap_or_else(|| Path::new(""));
-        let sub_path = normalize_document_sub_path(&sub_path.to_string_lossy())?;
+        let sub_path = if let Some(requested_sub_path) = requested_sub_path {
+            normalize_document_sub_path(requested_sub_path)?
+        } else {
+            let current_sub_path = current
+                .path
+                .strip_prefix(&self.docs_directory)
+                .ok()
+                .and_then(Path::parent)
+                .unwrap_or_else(|| Path::new(""));
+            normalize_document_sub_path(&current_sub_path.to_string_lossy())?
+        };
         let relative = self.document_relative_path(&document, &sub_path);
         let destination = self.docs_directory.join(relative);
         lock.check()

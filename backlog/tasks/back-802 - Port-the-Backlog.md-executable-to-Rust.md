@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@codex'
 created_date: '2026-11-07T21:53:00Z'
-updated_date: '2026-11-12T15:35:00Z'
+updated_date: '2026-11-12T15:58:00Z'
 labels: []
 dependencies:
   - BACK-801
@@ -147,4 +147,6 @@ BACK-802.53 completed: added `task <id>` and the `tasks` alias, with TypeScript-
 BACK-802.54 completed and pushed as 8b02ebe9: Rust `doc list --plain` now matches TypeScript ordering, empty output, paging, count and validation. Full Cargo suite, scoped Bun list-window tests (17), Biome, rustfmt and Clippy passed; reviews found no blockers. BACK-802.55 completed and pushed as eb055fe6: Rust `doc view` handles active/archived IDs, stored Markdown, archived notice, missing and ambiguity errors. Full Cargo suite, focused Bun document view/archive tests (41), Biome, rustfmt and Clippy passed; reviews found no blockers. BACK-802.56 document creation is active. BACK-802.57-.58 cover document update/lifecycle; BACK-802.59-.61 cover decision list/view, create/edit, and lifecycle, sequenced next.
 
 BACK-802.56 completed: Rust `doc create` now matches title/type/path validation, default values, output and Markdown; explicit empty `--type` defaults to other. Full Cargo, rustfmt, Clippy, Biome, scoped Bun doc CLI tests (20), and isolated process parity passed; cold and full-context review findings were resolved. BACK-802.57 document update is active. The remaining canonical CLI tasks are tracked through BACK-802.71 (documents, decisions, milestones, search, config/agents, init, doctor/cleanup, workflow instructions/completion, batch edit/watch, overview/board export). BACK-802.72–.75 cover Rust HTTP/WebSocket with retained React, MCP, TUI, and platform distribution/cutover.
+
+BACK-802.57 completed: Rust `doc update` now supports title/content/type/tags/path, preserves omitted fields and unmanaged Markdown, and matches TypeScript refusal, tag-deduplication, and auto-commit failure behavior. Full Cargo (70 CLI integration tests and all Rust suites), 61 scoped Bun document tests / 355 assertions, rustfmt, Clippy, Biome, and diff checks passed. Cold and full-context review findings were resolved. BACK-802.58 document lifecycle CLI commands are active; subsequent decision, milestone, search/config/init/doctor, workflow, browser, MCP, TUI and distribution tasks are tracked through .75.
 <!-- SECTION:NOTES:END -->

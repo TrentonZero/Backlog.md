@@ -316,6 +316,10 @@ pub fn serialize_document(
     document: &DocumentRecord,
     original_source: &str,
 ) -> Result<String, SerializeError> {
+    let mut raw_content = document.raw_content.clone();
+    if !raw_content.is_empty() && !raw_content.ends_with('\n') {
+        raw_content.push('\n');
+    }
     let fields = vec![
         ("id", Some(json!(document.id))),
         ("title", Some(json!(document.title))),
@@ -334,10 +338,42 @@ pub fn serialize_document(
                 .map(|v| json!(v)),
         ),
     ];
-    let source = fields_with_source(fields, original_source, &document.raw_content)?;
+    let mut source = fields_with_source(fields, original_source, &raw_content)?;
+    if !original_source.is_empty()
+        && document.updated_date.is_some()
+        && !frontmatter::parse_frontmatter(original_source)?
+            .data
+            .contains_key("updated_date")
+    {
+        source = place_document_updated_date(source);
+    }
     if original_source.is_empty() && document.raw_content.is_empty() {
         Ok(format!("{source}\n"))
     } else {
         Ok(source)
     }
+}
+
+fn place_document_updated_date(source: String) -> String {
+    let Some((header, rest)) = source.split_once("\n---") else {
+        return source;
+    };
+    let mut lines: Vec<_> = header.split_inclusive('\n').map(str::to_owned).collect();
+    let Some(updated_index) = lines
+        .iter()
+        .position(|line| line.starts_with("updated_date:"))
+    else {
+        return source;
+    };
+    let mut updated_line = lines.remove(updated_index);
+    if !updated_line.ends_with('\n') {
+        updated_line.push('\n');
+    }
+    let insert_index = lines
+        .iter()
+        .position(|line| line.starts_with("created_date:"))
+        .map(|index| index + 1)
+        .unwrap_or(lines.len());
+    lines.insert(insert_index, updated_line);
+    format!("{}\n---{}", lines.concat().trim_end_matches('\n'), rest)
 }

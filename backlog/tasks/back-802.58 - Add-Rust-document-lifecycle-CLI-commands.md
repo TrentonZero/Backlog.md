@@ -1,10 +1,11 @@
 ---
 id: BACK-802.58
 title: Add Rust document lifecycle CLI commands
-status: To Do
+status: In Progress
 assignee:
   - '@codex'
 created_date: '2026-11-12T15:05:00Z'
+updated_date: '2026-11-12T15:57:00Z'
 labels: []
 dependencies:
   - BACK-802.57
@@ -37,3 +38,9 @@ Documents can be created and updated through the Rust CLI, but archiving, restor
 - [ ] #2 bun run check . passes when formatting/linting touched
 - [ ] #3 bun test (or scoped test) passes
 <!-- DOD:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+Compare TypeScript archive, restore, and delete CLI outputs/errors, linked-documentation reporting, symlink handling, and selected-path auto-commit with the existing DocumentStore lifecycle APIs. Add process parity for state/identity refusals, backlinks, byte-preserving moves, deletion, and Git failures; keep task/draft references unchanged. Run focused/full checks, review, finalize, and continue into decision commands.
+<!-- SECTION:PLAN:END -->
