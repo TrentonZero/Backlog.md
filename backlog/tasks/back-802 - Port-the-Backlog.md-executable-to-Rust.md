@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@codex'
 created_date: '2026-11-07T21:53:00Z'
-updated_date: '2026-11-12T00:16:00Z'
+updated_date: '2026-11-12T00:28:00Z'
 labels: []
 dependencies:
   - BACK-801
@@ -119,4 +119,6 @@ BACK-802.35 Port task modified-file filters to Rust is complete. TaskFilter now 
 BACK-802.36 completed: exact Rust milestone filtering now resolves stored IDs, numeric aliases, and titles across the combined active/archive corpus; collision, duplicate-title, blank-query, and no-milestone semantics are covered by live TypeScript parity. Full Rust suite, clippy, TypeScript milestone filter suites (27 tests), formatting, and diff checks passed. Cold simplicity and complexity reviews cleared the implementation. Groma agent-instructions remains unavailable in this environment.
 
 BACK-802.37 completed: Rust now applies Fuse-compatible closest-title milestone matching with stable full-corpus candidate resolution, preserving exact ID/title and no-milestone precedence. Live TypeScript parity covers fuzzy partial and typo queries, normalization, unmatched queries, and the hidden-closest-candidate case. Full Rust suite, clippy, rustfmt, and focused TypeScript milestone tests (27) passed. Cold and complexity reviews cleared the implementation. Groma agent-instructions is unavailable in this environment.
+
+BACK-802.38 completed: added the Rust searchable body and indexed field builder with live TypeScript parity for field order, optional fields, criteria/comments, ID and dependency variants, and large numeric IDs. Full Rust suite, Clippy, rustfmt, and task-search parity (17 tests) passed; reviews found no blockers. Groma remains unavailable.
 <!-- SECTION:NOTES:END -->

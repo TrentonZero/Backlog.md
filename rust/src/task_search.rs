@@ -1,0 +1,157 @@
+//! Canonical searchable text and fields shared by task search surfaces.
+
+use crate::records::TaskRecord;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TaskSearchFields {
+    pub title: String,
+    pub body_text: String,
+    pub id: String,
+    pub id_variants: Vec<String>,
+    pub dependency_ids: Vec<String>,
+    pub modified_files: Vec<String>,
+}
+
+/// Build the body text indexed alongside a task title and identity.
+pub fn build_task_search_body_text(task: &TaskRecord) -> String {
+    let mut parts = Vec::new();
+    if !task.description.is_empty() {
+        parts.push(task.description.clone());
+    }
+    if !task.acceptance_criteria_items.is_empty() {
+        let mut criteria = task.acceptance_criteria_items.iter().collect::<Vec<_>>();
+        criteria.sort_by_key(|criterion| criterion.index);
+        parts.push(
+            criteria
+                .iter()
+                .map(|criterion| {
+                    format!(
+                        "- [{}] {}",
+                        if criterion.checked { "x" } else { " " },
+                        criterion.text
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+    }
+    if let Some(plan) = task
+        .implementation_plan
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
+        parts.push(plan.to_owned());
+    }
+    if let Some(notes) = task
+        .implementation_notes
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
+        parts.push(notes.to_owned());
+    }
+    if !task.comments.is_empty() {
+        parts.push(
+            task.comments
+                .iter()
+                .map(|comment| comment.body.as_str())
+                .collect::<Vec<_>>()
+                .join("\n\n"),
+        );
+    }
+    if !task.labels.is_empty() {
+        parts.push(task.labels.join("\n"));
+    }
+    if !task.assignee.is_empty() {
+        parts.push(task.assignee.join("\n"));
+    }
+    if !task.modified_files.is_empty() {
+        parts.push(task.modified_files.join("\n"));
+    }
+    parts.join("\n\n")
+}
+
+/// Build each indexed field from one parsed task record.
+pub fn build_task_search_fields(task: &TaskRecord) -> TaskSearchFields {
+    TaskSearchFields {
+        title: task.title.clone(),
+        body_text: build_task_search_body_text(task),
+        id: task.id.clone(),
+        id_variants: task_id_search_variants(&task.id),
+        dependency_ids: task
+            .dependencies
+            .iter()
+            .flat_map(|dependency| task_id_search_variants(dependency))
+            .collect(),
+        modified_files: task.modified_files.clone(),
+    }
+}
+
+fn task_id_search_variants(id: &str) -> Vec<String> {
+    let lower_id = id.to_lowercase();
+    let prefix_end = id
+        .find('-')
+        .filter(|index| *index > 0 && id[..*index].bytes().all(|byte| byte.is_ascii_alphabetic()));
+    let suffix = prefix_end
+        .map_or(id, |index| &id[index + 1..])
+        .to_lowercase();
+    let segments = suffix
+        .split('.')
+        .map(canonical_numeric_segment)
+        .collect::<Option<Vec<_>>>();
+    let Some(segments) = segments else {
+        if id == lower_id {
+            return vec![id.to_owned()];
+        }
+        return vec![id.to_owned(), lower_id];
+    };
+
+    let canonical_suffix = segments.join(".");
+    let prefix = prefix_end.map_or("task-", |index| &id[..=index]);
+    let mut variants = Vec::new();
+    for variant in [
+        id.to_owned(),
+        lower_id,
+        format!("{prefix}{canonical_suffix}"),
+        format!("{}{canonical_suffix}", prefix.to_lowercase()),
+        canonical_suffix,
+    ] {
+        push_unique(&mut variants, variant);
+    }
+    for segment in segments {
+        push_unique(&mut variants, segment);
+    }
+    variants
+}
+
+fn canonical_numeric_segment(segment: &str) -> Option<String> {
+    if segment.is_empty() || !segment.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let number = segment.parse::<f64>().unwrap_or(f64::INFINITY);
+    Some(javascript_number_string(number))
+}
+
+fn javascript_number_string(number: f64) -> String {
+    if number.is_infinite() {
+        return "Infinity".to_owned();
+    }
+
+    let decimal = number.to_string();
+    if number < 1e21 {
+        return decimal;
+    }
+
+    let significant = decimal.trim_end_matches('0');
+    let exponent = decimal.len() - 1;
+    if significant.len() == 1 {
+        format!("{}e+{exponent}", significant)
+    } else {
+        format!("{}.{}e+{exponent}", &significant[..1], &significant[1..])
+    }
+}
+
+fn push_unique(values: &mut Vec<String>, value: String) {
+    if !values.contains(&value) {
+        values.push(value);
+    }
+}
