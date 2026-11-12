@@ -81,6 +81,23 @@ enum Command {
     },
     /// Search tasks, documents, and decisions.
     Search(SearchArgs),
+    /// Read or change project configuration.
+    Config {
+        #[command(subcommand)]
+        command: Option<ConfigCommand>,
+    },
+    /// Refresh shipped agent instructions.
+    Agents {
+        #[arg(long)]
+        update_instructions: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ConfigCommand {
+    Get { key: String },
+    Set { key: String, value: String },
+    List,
 }
 
 #[derive(Debug, Subcommand)]
@@ -807,6 +824,16 @@ struct EditableRecord {
 }
 
 pub fn run() -> Result<(), String> {
+    let arguments: Vec<String> = std::env::args().skip(1).collect();
+    let excluded = arguments.iter().any(|argument| {
+        matches!(
+            argument.as_str(),
+            "init" | "--help" | "-h" | "--version" | "-v"
+        )
+    });
+    if !arguments.is_empty() && !excluded {
+        migrate_project_config();
+    }
     let cli = Cli::parse();
     match cli.command {
         Command::Task {
@@ -979,6 +1006,27 @@ pub fn run() -> Result<(), String> {
             }
         },
         Command::Search(options) => run_search(options),
+        Command::Config { command } => match command {
+            Some(ConfigCommand::Get { key }) => run_config_get(&key),
+            Some(ConfigCommand::Set { key, value }) => run_config_set(&key, &value),
+            Some(ConfigCommand::List) => run_config_list(),
+            None => run_config_wizard(),
+        },
+        Command::Agents {
+            update_instructions,
+        } => {
+            if update_instructions {
+                run_agents_update()
+            } else {
+                let mut command = Cli::command();
+                let agents = command.find_subcommand_mut("agents").unwrap();
+                let mut help = Vec::new();
+                agents
+                    .write_help(&mut help)
+                    .map_err(|error| error.to_string())?;
+                write_stdout(&format!("{}\n", String::from_utf8_lossy(&help).trim_end()))
+            }
+        }
     }
 }
 
@@ -1024,6 +1072,1160 @@ fn project_context() -> Result<ProjectContext, String> {
         store,
         prefix,
     })
+}
+
+/// Apply the TypeScript CLI's pre-command schema migration without rewriting unrelated YAML.
+/// Clap exits while parsing --help/--version and rejects init before `run` continues, matching
+/// the TypeScript migration exclusions for those invocations.
+fn migrate_project_config() {
+    let Ok(cwd) = std::env::current_dir() else {
+        return;
+    };
+    let Some(root) = find_project_root(&cwd) else {
+        return;
+    };
+    let resolution = resolve_backlog_directory(&root);
+    let Some(path) = resolution.config_path else {
+        return;
+    };
+    let Ok(source) = fs::read_to_string(&path) else {
+        return;
+    };
+    let Ok(mapping) = crate::frontmatter::parse_yaml_mapping(&source) else {
+        return;
+    };
+    let present = |snake: &str, camel: &str| {
+        mapping.contains_key(snake) || (snake == "backlog_directory" && mapping.contains_key(camel))
+    };
+    let schema_keys = [
+        ("default_port", "defaultPort"),
+        ("auto_open_browser", "autoOpenBrowser"),
+        ("remote_operations", "remoteOperations"),
+        ("auto_commit", "autoCommit"),
+    ];
+    let needs_schema_migration = schema_keys
+        .iter()
+        .any(|(snake, camel)| !present(snake, camel));
+    let Ok(config) = parse_config(&source, &path) else {
+        return;
+    };
+    let legacy_milestones = mapping
+        .get("milestones")
+        .map(|value| match value {
+            Value::Array(values) => values.iter().map(legacy_milestone_name).collect(),
+            Value::String(_) | Value::Number(_) | Value::Bool(_) => {
+                vec![legacy_milestone_name(value)]
+            }
+            Value::Null => Vec::new(),
+            _ => Vec::new(),
+        })
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|name| !name.trim().is_empty())
+        .collect::<Vec<_>>();
+    let migrated =
+        needs_schema_migration.then(|| crate::config::migrate_config(Some(config.clone())));
+    let mut changes = std::collections::BTreeMap::new();
+    let mut add = |snake: &str, camel: &str, value: Value| {
+        if !present(snake, camel) {
+            changes.insert(snake.to_owned(), Some(value));
+        }
+    };
+    if let Some(migrated) = &migrated {
+        add(
+            "project_name",
+            "projectName",
+            Value::String(config.project_name.clone()),
+        );
+        add(
+            "statuses",
+            "statuses",
+            serde_json::to_value(&migrated.statuses).unwrap_or(Value::Null),
+        );
+        add(
+            "labels",
+            "labels",
+            serde_json::to_value(&migrated.labels).unwrap_or(Value::Null),
+        );
+        add(
+            "date_format",
+            "dateFormat",
+            Value::String(migrated.date_format.clone()),
+        );
+        add(
+            "max_column_width",
+            "maxColumnWidth",
+            Value::from(migrated.max_column_width.unwrap_or(80.0) as i64),
+        );
+        add(
+            "auto_open_browser",
+            "autoOpenBrowser",
+            Value::Bool(migrated.auto_open_browser.unwrap_or(true)),
+        );
+        add(
+            "default_port",
+            "defaultPort",
+            Value::from(migrated.default_port.unwrap_or(6420.0) as i64),
+        );
+        add(
+            "remote_operations",
+            "remoteOperations",
+            Value::Bool(migrated.remote_operations.unwrap_or(true)),
+        );
+        add(
+            "auto_commit",
+            "autoCommit",
+            Value::Bool(migrated.auto_commit.unwrap_or(false)),
+        );
+        add(
+            "bypass_git_hooks",
+            "bypassGitHooks",
+            Value::Bool(migrated.bypass_git_hooks.unwrap_or(false)),
+        );
+        add(
+            "check_active_branches",
+            "checkActiveBranches",
+            Value::Bool(migrated.check_active_branches.unwrap_or(true)),
+        );
+        add(
+            "active_branch_days",
+            "activeBranchDays",
+            Value::from(migrated.active_branch_days.unwrap_or(30.0) as i64),
+        );
+        if resolution.config_location == Some(crate::config::ConfigLocation::Root) {
+            add(
+                "backlog_directory",
+                "backlogDirectory",
+                Value::String(
+                    resolution
+                        .backlog_directory
+                        .clone()
+                        .unwrap_or_else(|| "backlog".into()),
+                ),
+            );
+        }
+        if let Some(task_prefix) = config.task_prefix.as_deref() {
+            if task_prefix.is_empty() {
+                changes.insert("task_prefix".into(), None);
+            } else if !present("task_prefix", "taskPrefix") {
+                changes.insert(
+                    "task_prefix".into(),
+                    Some(Value::String(task_prefix.to_owned())),
+                );
+            }
+        }
+    }
+    if !legacy_milestones.is_empty() {
+        let store = MilestoneStore::new(
+            &root,
+            resolution
+                .backlog_directory
+                .clone()
+                .unwrap_or_else(|| "backlog".into()),
+        );
+        let mut keys = store
+            .list_active()
+            .iter()
+            .flat_map(|milestone| [milestone.id.as_str(), milestone.title.as_str()])
+            .map(|value| value.trim().to_lowercase())
+            .filter(|value| !value.is_empty())
+            .collect::<std::collections::HashSet<_>>();
+        let mut succeeded = true;
+        for name in legacy_milestones {
+            let title = name.trim();
+            let key = title.to_lowercase();
+            if title.is_empty() || keys.contains(&key) {
+                continue;
+            }
+            match store.create(title, None, None) {
+                Ok(created) => {
+                    keys.insert(created.id.trim().to_lowercase());
+                    keys.insert(created.title.trim().to_lowercase());
+                }
+                Err(_) => succeeded = false,
+            }
+        }
+        if succeeded {
+            changes.insert("milestones".into(), None);
+        }
+    } else if needs_schema_migration && mapping.contains_key("milestones") {
+        changes.insert("milestones".into(), None);
+    }
+    if !changes.is_empty()
+        && let Ok(updated) = crate::config::update_config_source(&source, &changes)
+    {
+        let _ = fs::write(path, updated);
+    }
+}
+
+fn legacy_milestone_name(value: &Value) -> String {
+    match value {
+        Value::String(value) => value.clone(),
+        Value::Null => "null".into(),
+        Value::Bool(value) => value.to_string(),
+        Value::Number(value) => value.to_string(),
+        _ => String::new(),
+    }
+}
+
+const CONFIG_AVAILABLE_KEYS: &str = "Available keys: defaultEditor, projectName, defaultAssignee, defaultStatus, statuses, labels, priorities, types, projects, milestones, definitionOfDone, dateFormat, maxColumnWidth, defaultPort, autoOpenBrowser, hideEmptyColumns, remoteOperations, autoCommit, filesystemOnly, bypassGitHooks, zeroPaddedIds, checkActiveBranches, activeBranchDays";
+
+fn run_config_get(key: &str) -> Result<(), String> {
+    let context = project_context()?;
+    let c = &context.config;
+    let value = match key {
+        "projectName" => c.project_name.clone(),
+        "defaultEditor" => match c.default_editor.clone().filter(|v| !v.is_empty()) {
+            Some(value) => value,
+            None => {
+                write_stdout("defaultEditor is not set\n")?;
+                std::process::exit(1);
+            }
+        },
+        "defaultAssignee" => c.default_assignee.clone().unwrap_or_default().join(", "),
+        "defaultStatus" => c.default_status.clone().unwrap_or_default(),
+        "statuses" => c.statuses.join(", "),
+        "labels" => c.labels.join(", "),
+        "priorities" => c
+            .priorities
+            .clone()
+            .unwrap_or_else(|| vec!["High".into(), "Medium".into(), "Low".into()])
+            .join(", "),
+        "types" => c
+            .types
+            .clone()
+            .unwrap_or_else(|| {
+                vec![
+                    "bug".into(),
+                    "feature".into(),
+                    "enhancement".into(),
+                    "task".into(),
+                    "chore".into(),
+                    "docs".into(),
+                    "spike".into(),
+                ]
+            })
+            .join(", "),
+        "projects" => c.projects.clone().unwrap_or_default().join(", "),
+        "milestones" => {
+            crate::milestone_store::MilestoneStore::new(&context.root, &context.backlog_directory)
+                .list_active()
+                .iter()
+                .map(|item| item.id.clone())
+                .collect::<Vec<_>>()
+                .join(", ")
+        }
+        "definitionOfDone" => c.definition_of_done.clone().unwrap_or_default().join(", "),
+        "dateFormat" => c.date_format.clone(),
+        "maxColumnWidth" => c.max_column_width.map(num_string).unwrap_or_default(),
+        "defaultPort" => c.default_port.map(num_string).unwrap_or_default(),
+        "zeroPaddedIds" => c
+            .zero_padded_ids
+            .map(num_string)
+            .unwrap_or_else(|| "(disabled)".into()),
+        "activeBranchDays" => c
+            .active_branch_days
+            .map(num_string)
+            .unwrap_or_else(|| "30".into()),
+        "autoOpenBrowser" => c
+            .auto_open_browser
+            .map(|v| v.to_string())
+            .unwrap_or_default(),
+        "hideEmptyColumns" => c.hide_empty_columns.unwrap_or(false).to_string(),
+        "remoteOperations" => c
+            .remote_operations
+            .map(|v| v.to_string())
+            .unwrap_or_default(),
+        "autoCommit" => c.auto_commit.map(|v| v.to_string()).unwrap_or_default(),
+        "filesystemOnly" => c.filesystem_only.unwrap_or(false).to_string(),
+        "bypassGitHooks" => c
+            .bypass_git_hooks
+            .map(|v| v.to_string())
+            .unwrap_or_default(),
+        "checkActiveBranches" => c.check_active_branches.unwrap_or(true).to_string(),
+        _ => {
+            return Err(format!(
+                "Unknown config key: {key}\n{CONFIG_AVAILABLE_KEYS}"
+            ));
+        }
+    };
+    write_stdout(&format!("{value}\n"))
+}
+
+fn num_string(value: f64) -> String {
+    if value.fract() == 0.0 {
+        format!("{value:.0}")
+    } else {
+        value.to_string()
+    }
+}
+
+fn parse_int_prefix(value: &str) -> Option<i64> {
+    let trimmed = value.trim_start();
+    let sign_len = usize::from(trimmed.starts_with(['+', '-']));
+    let rest = &trimmed[sign_len..];
+    let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+    if digits == 0 {
+        return None;
+    }
+    trimmed[..sign_len + digits].parse().ok()
+}
+
+fn numeric_error(key: &str) -> String {
+    match key {
+        "maxColumnWidth" => "maxColumnWidth must be a positive number".into(),
+        "defaultPort" => "defaultPort must be a valid port number (1-65535)".into(),
+        "zeroPaddedIds" => "zeroPaddedIds must be a non-negative number.".into(),
+        _ => "activeBranchDays must be a non-negative number.".into(),
+    }
+}
+
+fn editor_exists(value: &str) -> bool {
+    let executable = value.split(' ').next().unwrap_or("");
+    #[cfg(windows)]
+    let candidates = editor_candidate_names(
+        executable,
+        &std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into()),
+        true,
+    );
+    #[cfg(not(windows))]
+    let candidates = editor_candidate_names(executable, "", false);
+    std::env::var_os("PATH")
+        .into_iter()
+        .flat_map(|paths| std::env::split_paths(&paths).collect::<Vec<_>>())
+        .any(|path| {
+            candidates.iter().any(|name| {
+                let candidate = path.join(name);
+                if !candidate.is_file() {
+                    return false;
+                }
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    candidate
+                        .metadata()
+                        .is_ok_and(|metadata| metadata.permissions().mode() & 0o111 != 0)
+                }
+                #[cfg(not(unix))]
+                {
+                    true
+                }
+            })
+        })
+}
+
+fn editor_candidate_names(command: &str, pathext: &str, windows: bool) -> Vec<String> {
+    if command.is_empty() {
+        return Vec::new();
+    }
+    if !windows || std::path::Path::new(command).extension().is_some() {
+        return vec![command.to_owned()];
+    }
+    pathext
+        .split(';')
+        .filter(|extension| !extension.is_empty())
+        .map(|extension| format!("{command}{extension}"))
+        .collect()
+}
+
+fn run_config_set(key: &str, value: &str) -> Result<(), String> {
+    let context = project_context()?;
+    let (yaml_key, json) = match key {
+        "defaultEditor" => {
+            if !value.is_empty() && !editor_exists(value) { return Err(format!("Editor command not found: {value}\nPlease ensure the editor is installed and available in your PATH")); }
+            ("default_editor", if value.is_empty() { None } else { Some(Value::String(value.into())) })
+        },
+        "defaultAssignee" => {
+            let mut seen = HashSet::new();
+            let values = value.split(',').map(str::trim).filter(|v| !v.is_empty()).filter(|v| seen.insert((*v).to_owned())).map(|v| Value::String(v.into())).collect::<Vec<_>>();
+            ("default_assignee", if values.is_empty() { None } else { Some(Value::Array(values)) })
+        },
+        "projectName" => ("project_name", Some(Value::String(value.into()))),
+        "defaultStatus" => ("default_status", Some(Value::String(value.into()))),
+        "dateFormat" => ("date_format", Some(Value::String(value.into()))),
+        "maxColumnWidth" | "defaultPort" | "zeroPaddedIds" | "activeBranchDays" => {
+            let number = parse_int_prefix(value).ok_or_else(|| numeric_error(key))?;
+            if number < 0 || (key == "maxColumnWidth" && number == 0) || (key == "defaultPort" && !(1..=65535).contains(&number)) { return Err(numeric_error(key)); }
+            let yaml_key = match key { "maxColumnWidth"=>"max_column_width", "defaultPort"=>"default_port", "zeroPaddedIds"=>"zero_padded_ids", _=>"active_branch_days" };
+            (yaml_key, if key == "zeroPaddedIds" && number == 0 { None } else { Some(Value::Number(number.into())) })
+        },
+        "autoOpenBrowser" | "hideEmptyColumns" | "remoteOperations" | "autoCommit" | "filesystemOnly" | "bypassGitHooks" | "checkActiveBranches" => {
+            let b = match value.to_ascii_lowercase().as_str() { "true"|"1"|"yes"=>true, "false"|"0"|"no"=>false, _=>return Err(format!("{key} must be true or false")) };
+            if key == "filesystemOnly" && b { /* match TypeScript side effects below */ }
+            let yaml_key = match key { "autoOpenBrowser"=>"auto_open_browser", "hideEmptyColumns"=>"hide_empty_columns", "remoteOperations"=>"remote_operations", "autoCommit"=>"auto_commit", "filesystemOnly"=>"filesystem_only", "bypassGitHooks"=>"bypass_git_hooks", _=>"check_active_branches" };
+            (yaml_key, Some(Value::Bool(b)))
+        },
+        "milestones" => return Err("milestones cannot be set directly.\nUse milestone files via milestone commands (e.g. `backlog milestone list`, `backlog milestone add`).".into()),
+        "statuses"|"labels"|"priorities"|"types"|"projects" => return Err(format!("{key} cannot be set directly. View current values with 'backlog config get {key}'.\nEdit the list in the project config file (`backlog/config.yml`, `.backlog/config.yml`, or `backlog.config.yml`) directly.")),
+        "definitionOfDone" => return Err("definitionOfDone cannot be set directly.\nUse `backlog config` for interactive editing, update the project config file (`backlog/config.yml`, `.backlog/config.yml`, or `backlog.config.yml`), or use Web UI Settings.".into()),
+        "taskPrefix"|"prefixes" => return Err("Task prefix cannot be changed after initialization.\nThe prefix is set during 'backlog init' and is permanent to avoid breaking existing task IDs.".into()),
+        _ => return Err(format!("Unknown config key: {key}\n{CONFIG_AVAILABLE_KEYS}")),
+    };
+    let path = context
+        .config_path
+        .ok_or("No backlog project found. Initialize one first with: backlog init")?;
+    let source = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let mut changes = std::collections::BTreeMap::new();
+    changes.insert(yaml_key.to_owned(), json);
+    if key == "filesystemOnly"
+        && matches!(value.to_ascii_lowercase().as_str(), "true" | "yes" | "1")
+    {
+        changes.insert("check_active_branches".into(), Some(Value::Bool(false)));
+        changes.insert("remote_operations".into(), Some(Value::Bool(false)));
+        changes.insert("auto_commit".into(), Some(Value::Bool(false)));
+        changes.insert("bypass_git_hooks".into(), Some(Value::Bool(false)));
+    }
+    let edited = crate::config::update_config_source(&source, &changes)?;
+    fs::write(path, edited).map_err(|e| e.to_string())?;
+    write_stdout(&format!("Set {key} = {value}\n"))
+}
+
+fn run_config_list() -> Result<(), String> {
+    let context = project_context()?;
+    let c = &context.config;
+    let milestones =
+        crate::milestone_store::MilestoneStore::new(&context.root, &context.backlog_directory)
+            .list_active()
+            .iter()
+            .map(|item| item.id.clone())
+            .collect::<Vec<_>>();
+    let list = |key: &str, value: String| format!("  {key}: {value}\n");
+    let mut output = String::from("Configuration:\n");
+    for key in [
+        "projectName",
+        "defaultEditor",
+        "defaultAssignee",
+        "defaultStatus",
+        "statuses",
+        "labels",
+        "priorities",
+        "types",
+        "projects",
+        "milestones",
+        "definitionOfDone",
+        "dateFormat",
+        "maxColumnWidth",
+        "autoOpenBrowser",
+        "hideEmptyColumns",
+        "defaultPort",
+        "remoteOperations",
+        "autoCommit",
+        "filesystemOnly",
+        "bypassGitHooks",
+        "zeroPaddedIds",
+        "checkActiveBranches",
+        "activeBranchDays",
+    ] {
+        let mut value = config_display(c, key);
+        if key == "milestones" {
+            value = format!("[{}]", milestones.join(", "));
+        }
+        if [
+            "statuses",
+            "labels",
+            "priorities",
+            "types",
+            "projects",
+            "definitionOfDone",
+        ]
+        .contains(&key)
+        {
+            if key == "statuses" {
+                value = format!("[{}]", c.statuses.join(", "));
+            }
+            if key == "labels" {
+                value = format!("[{}]", c.labels.join(", "));
+            }
+            if key == "priorities" {
+                value = format!(
+                    "[{}]",
+                    c.priorities
+                        .as_ref()
+                        .cloned()
+                        .unwrap_or_else(|| vec!["High".into(), "Medium".into(), "Low".into()])
+                        .join(", ")
+                );
+            }
+            if key == "types" {
+                value = format!(
+                    "[{}]",
+                    c.types
+                        .as_ref()
+                        .cloned()
+                        .unwrap_or_else(|| vec![
+                            "bug".into(),
+                            "feature".into(),
+                            "enhancement".into(),
+                            "task".into(),
+                            "chore".into(),
+                            "docs".into(),
+                            "spike".into()
+                        ])
+                        .join(", ")
+                );
+            }
+            if key == "projects" {
+                value = format!(
+                    "[{}]",
+                    c.projects.as_ref().cloned().unwrap_or_default().join(", ")
+                );
+            }
+            if key == "definitionOfDone" {
+                value = format!(
+                    "[{}]",
+                    c.definition_of_done
+                        .as_ref()
+                        .cloned()
+                        .unwrap_or_default()
+                        .join(", ")
+                );
+            }
+        }
+        if key == "defaultAssignee" {
+            value = format!(
+                "[{}]",
+                c.default_assignee
+                    .as_ref()
+                    .cloned()
+                    .unwrap_or_default()
+                    .join(", ")
+            );
+        }
+        output.push_str(&list(key, value));
+    }
+    // taskPrefix is printed between zeroPaddedIds and the branch settings.
+    let branch_marker = "  checkActiveBranches:";
+    if let Some(index) = output.find(branch_marker) {
+        output.insert_str(
+            index,
+            &format!(
+                "  taskPrefix: {} (read-only)\n",
+                c.task_prefix.as_deref().unwrap_or("task")
+            ),
+        );
+    }
+    write_stdout(&output)
+}
+
+fn run_config_wizard() -> Result<(), String> {
+    let context = project_context()?;
+    let config_path = context
+        .config_path
+        .as_ref()
+        .ok_or("No backlog project found. Initialize one first with: backlog init")?;
+    let config = &context.config;
+    let completion = wizard_confirm("Install shell completions now?", true)?;
+    let mut check_active_branches = config.check_active_branches.unwrap_or(true);
+    let mut remote_operations = config.remote_operations.unwrap_or(true);
+    let mut active_branch_days = config.active_branch_days.unwrap_or(30.0);
+    if wizard_confirm(
+        "Check task states across active branches?",
+        check_active_branches,
+    )? {
+        check_active_branches = true;
+        remote_operations =
+            wizard_confirm("Check task states in remote branches?", remote_operations)?;
+        active_branch_days = wizard_number(
+            "How many days should a branch be considered active?",
+            active_branch_days,
+            1.0,
+            365.0,
+        )?;
+    } else {
+        check_active_branches = false;
+        remote_operations = false;
+    }
+    let bypass_git_hooks = wizard_confirm(
+        "Bypass git hooks when committing?",
+        config.bypass_git_hooks.unwrap_or(false),
+    )?;
+    let auto_commit = wizard_confirm(
+        "Enable automatic commits for Backlog operations?",
+        config.auto_commit.unwrap_or(false),
+    )?;
+    let zero_padded_ids = if wizard_confirm(
+        "Enable zero-padded IDs for consistent formatting?",
+        config.zero_padded_ids.unwrap_or(0.0) > 0.0,
+    )? {
+        Some(wizard_number(
+            "Number of digits for zero-padding:",
+            config.zero_padded_ids.unwrap_or(3.0),
+            1.0,
+            10.0,
+        )?)
+    } else {
+        None
+    };
+
+    let editor = wizard_line(
+        "Default editor command (leave blank to use system default):",
+        config.default_editor.as_deref().unwrap_or(""),
+    )?;
+    let default_editor = if editor.is_empty() {
+        None
+    } else if editor_exists(&editor) {
+        Some(editor)
+    } else {
+        write_stderr(&format!(
+            "Warning: Editor command '{editor}' not found in PATH\n"
+        ))?;
+        wizard_confirm("Editor not found. Set it anyway?", false)?.then_some(editor)
+    };
+
+    let mut definition_of_done = config
+        .definition_of_done
+        .clone()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|item| item.trim().to_owned())
+        .filter(|item| !item.is_empty())
+        .collect::<Vec<_>>();
+    loop {
+        let preview = if definition_of_done.is_empty() {
+            "(none)".to_owned()
+        } else {
+            definition_of_done
+                .iter()
+                .enumerate()
+                .map(|(index, item)| format!("{}. {item}", index + 1))
+                .collect::<Vec<_>>()
+                .join(" | ")
+        };
+        let available_actions = if definition_of_done.is_empty() {
+            vec![1, 5]
+        } else if definition_of_done.len() == 1 {
+            vec![1, 2, 4, 5]
+        } else {
+            vec![1, 2, 3, 4, 5]
+        };
+        let action = loop {
+            let default = if definition_of_done.is_empty() { 1 } else { 5 };
+            let actions = available_actions
+                .iter()
+                .map(|action| match action {
+                    1 => "1 Add",
+                    2 => "2 Remove",
+                    3 => "3 Reorder",
+                    4 => "4 Clear",
+                    _ => "5 Done",
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            let value = wizard_line(
+                &format!("Definition of Done defaults: {preview}\nChoose: {actions}"),
+                &default.to_string(),
+            )?;
+            let action = if value.is_empty() {
+                Some(default)
+            } else {
+                value.parse::<usize>().ok()
+            };
+            if let Some(action) = action
+                && available_actions.contains(&action)
+            {
+                break action;
+            }
+            write_stderr("Choose one of the available actions.\n")?;
+        };
+        match action {
+            1 => {
+                let item = wizard_text("New Definition of Done item:", "")?;
+                if !item.is_empty() {
+                    definition_of_done.push(item);
+                }
+            }
+            2 if !definition_of_done.is_empty() => {
+                let index = wizard_choice(
+                    &format!("Remove which item number (1-{})?", definition_of_done.len()),
+                    definition_of_done.len(),
+                    1,
+                    definition_of_done.len(),
+                )? - 1;
+                definition_of_done.remove(index);
+            }
+            3 if definition_of_done.len() >= 2 => {
+                let from = wizard_choice(
+                    &format!("Move which item number (1-{})?", definition_of_done.len()),
+                    definition_of_done.len(),
+                    1,
+                    definition_of_done.len(),
+                )? - 1;
+                let to = wizard_choice(
+                    &format!("Move to which position (1-{})?", definition_of_done.len()),
+                    1,
+                    1,
+                    definition_of_done.len(),
+                )? - 1;
+                if from != to {
+                    let item = definition_of_done.remove(from);
+                    definition_of_done.insert(to, item);
+                }
+            }
+            4 if !definition_of_done.is_empty() => {
+                if wizard_confirm("Clear all Definition of Done defaults?", false)? {
+                    definition_of_done.clear();
+                }
+            }
+            _ => break,
+        }
+    }
+
+    let mut default_port = config.default_port.unwrap_or(6420.0);
+    let mut auto_open_browser = config.auto_open_browser.unwrap_or(true);
+    if wizard_confirm("Configure web UI settings now?", false)? {
+        default_port = wizard_number("Default web UI port:", default_port, 1.0, 65535.0)?;
+        auto_open_browser = wizard_confirm(
+            "Automatically open browser when starting web UI?",
+            auto_open_browser,
+        )?;
+    }
+    let install_claude = wizard_confirm("Install Claude Code Backlog.md agent?", false)?;
+
+    let mut changes = std::collections::BTreeMap::new();
+    changes.insert(
+        "check_active_branches".into(),
+        Some(Value::Bool(check_active_branches)),
+    );
+    changes.insert(
+        "remote_operations".into(),
+        Some(Value::Bool(remote_operations)),
+    );
+    changes.insert(
+        "active_branch_days".into(),
+        Some(Value::from(active_branch_days)),
+    );
+    changes.insert(
+        "bypass_git_hooks".into(),
+        Some(Value::Bool(bypass_git_hooks)),
+    );
+    changes.insert("auto_commit".into(), Some(Value::Bool(auto_commit)));
+    changes.insert("zero_padded_ids".into(), zero_padded_ids.map(Value::from));
+    changes.insert(
+        "default_editor".into(),
+        default_editor.clone().map(Value::String),
+    );
+    changes.insert(
+        "definition_of_done".into(),
+        if definition_of_done.is_empty() {
+            None
+        } else {
+            Some(serde_json::to_value(&definition_of_done).unwrap_or(Value::Null))
+        },
+    );
+    changes.insert("default_port".into(), Some(Value::from(default_port)));
+    changes.insert(
+        "auto_open_browser".into(),
+        Some(Value::Bool(auto_open_browser)),
+    );
+    let source = fs::read_to_string(config_path).map_err(|error| error.to_string())?;
+    let updated = crate::config::update_config_source(&source, &changes)?;
+    fs::write(config_path, updated).map_err(|error| error.to_string())?;
+
+    write_stdout("\nAdvanced configuration updated.\n")?;
+    write_stdout(&format!(
+        "  Check active branches: {check_active_branches}\n"
+    ))?;
+    write_stdout(&format!("  Remote operations: {remote_operations}\n"))?;
+    write_stdout(&format!(
+        "  Zero-padded IDs: {}\n",
+        zero_padded_ids.map_or_else(|| "disabled".into(), |digits| format!("{digits} digits"))
+    ))?;
+    write_stdout(&format!("  Web UI port: {default_port}\n"))?;
+    write_stdout(&format!("  Auto open browser: {auto_open_browser}\n"))?;
+    write_stdout(&format!("  Bypass git hooks: {bypass_git_hooks}\n"))?;
+    write_stdout(&format!("  Auto commit: {auto_commit}\n"))?;
+    write_stdout(&format!(
+        "  Definition of Done defaults: {}\n",
+        if definition_of_done.is_empty() {
+            "(none)".into()
+        } else {
+            definition_of_done.join(" | ")
+        }
+    ))?;
+    if completion {
+        match install_shell_completion() {
+            Ok((path, instructions)) => {
+                write_stdout(&format!(
+                    "  Shell completions: installed to {}\n",
+                    path.display()
+                ))?;
+                write_stdout(&instructions)?;
+            }
+            Err(error) => {
+                write_stdout("  Shell completions: installation failed (see warning below)\n")?;
+                write_stderr(&format!("Warning: {error}\n"))?;
+            }
+        }
+    } else {
+        write_stdout("  Shell completions: skipped\n")?;
+    }
+    if let Some(editor) = default_editor {
+        write_stdout(&format!("  Default editor: {editor}\n"))?;
+    }
+    if install_claude {
+        install_claude_agent(&context.root)?;
+        write_stdout("✓ Claude Code Backlog.md agent installed to .claude/agents/\n")?;
+    }
+    write_stdout("\nUse `backlog config list` to review all configuration values.\n")
+}
+
+fn wizard_line(prompt: &str, initial: &str) -> Result<String, String> {
+    write_stdout(&format!("{prompt} [{initial}]: "))?;
+    io::stdout().flush().map_err(|error| error.to_string())?;
+    let mut line = String::new();
+    let read = io::stdin()
+        .read_line(&mut line)
+        .map_err(|error| error.to_string())?;
+    if read == 0 {
+        return Err("Configuration cancelled.".into());
+    }
+    Ok(line.trim().to_owned())
+}
+
+fn wizard_confirm(prompt: &str, initial: bool) -> Result<bool, String> {
+    loop {
+        let value = wizard_line(prompt, if initial { "Y/n" } else { "y/N" })?;
+        match value.to_ascii_lowercase().as_str() {
+            "" => return Ok(initial),
+            "y" | "yes" | "true" | "1" => return Ok(true),
+            "n" | "no" | "false" | "0" => return Ok(false),
+            _ => write_stderr("Enter y or n.\n")?,
+        }
+    }
+}
+
+fn wizard_text(prompt: &str, initial: &str) -> Result<String, String> {
+    let value = wizard_line(prompt, initial)?;
+    Ok(if value.is_empty() {
+        initial.to_owned()
+    } else {
+        value
+    })
+}
+
+fn wizard_number(prompt: &str, initial: f64, min: f64, max: f64) -> Result<f64, String> {
+    loop {
+        let value = wizard_line(prompt, &initial.to_string())?;
+        if value.is_empty() {
+            return Ok(initial);
+        }
+        if let Ok(number) = value.parse::<f64>()
+            && number.is_finite()
+            && (min..=max).contains(&number)
+        {
+            return Ok(number);
+        }
+        write_stderr(&format!("Enter a number from {min} to {max}.\n"))?;
+    }
+}
+
+fn wizard_choice(prompt: &str, initial: usize, min: usize, max: usize) -> Result<usize, String> {
+    loop {
+        let value = wizard_line(prompt, &initial.to_string())?;
+        if value.is_empty() {
+            return Ok(initial);
+        }
+        if let Ok(choice) = value.parse::<usize>()
+            && (min..=max).contains(&choice)
+        {
+            return Ok(choice);
+        }
+        write_stderr(&format!("Choose a number from {min} to {max}.\n"))?;
+    }
+}
+
+fn install_claude_agent(project_root: &std::path::Path) -> Result<(), String> {
+    let agent_dir = project_root.join(".claude/agents");
+    fs::create_dir_all(&agent_dir).map_err(|error| error.to_string())?;
+    let agent = include_str!("../../src/guidelines/project-manager-backlog.md");
+    let version = env!("CARGO_PKG_VERSION");
+    let content = format!(
+        "{}\n\n<!-- backlog.md-instructions-version: {version} -->\n",
+        agent.trim_end()
+    );
+    fs::write(agent_dir.join("project-manager-backlog.md"), content)
+        .map_err(|error| error.to_string())
+}
+
+fn install_shell_completion() -> Result<(PathBuf, String), String> {
+    let shell = std::env::var("SHELL").unwrap_or_default();
+    let profile_path;
+    let (script, relative, enable) = if shell.contains("bash") {
+        (
+            include_str!("../../completions/backlog.bash"),
+            ".local/share/bash-completion/completions/backlog",
+            "bash",
+        )
+    } else if shell.contains("zsh") {
+        (
+            include_str!("../../completions/_backlog"),
+            ".zsh/completions/_backlog",
+            "zsh",
+        )
+    } else if shell.contains("fish") {
+        (
+            include_str!("../../completions/backlog.fish"),
+            ".config/fish/completions/backlog.fish",
+            "fish",
+        )
+    } else if shell.contains("pwsh") {
+        let output = std::process::Command::new("pwsh")
+            .args(["-NoProfile", "-Command", "$PROFILE.CurrentUserAllHosts"])
+            .output()
+            .map_err(|error| format!("Could not resolve your PowerShell profile path: {error}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "Could not resolve your PowerShell profile path: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        profile_path = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        if profile_path.is_empty() {
+            return Err("PowerShell returned an empty profile path".into());
+        }
+        let profile_path_buf = PathBuf::from(&profile_path);
+        let profile_dir = profile_path_buf
+            .parent()
+            .ok_or_else(|| "Could not determine the PowerShell profile directory".to_owned())?;
+        let path = profile_dir.join("Completions/backlog-completion.ps1");
+        let script = include_str!("../../completions/backlog.ps1");
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        }
+        fs::write(&path, script).map_err(|error| error.to_string())?;
+        let instructions = format!(
+            "\nTo enable completions, add this to your PowerShell profile ({profile_path}):\n$completionScript = Join-Path (Split-Path -Parent $PROFILE.CurrentUserAllHosts) \"Completions/backlog-completion.ps1\"\nif (Test-Path $completionScript) {{ . $completionScript }}\n\nThen restart PowerShell or run:\n. $PROFILE.CurrentUserAllHosts\n\n"
+        );
+        return Ok((path, instructions));
+    } else {
+        return Err("Could not detect your shell. Run `backlog completion install --shell bash|zsh|fish|pwsh` later.".into());
+    };
+    let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+        .map(PathBuf::from)
+        .ok_or_else(|| "Could not determine the user home directory".to_owned())?;
+    let path = home.join(relative);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    fs::write(&path, script).map_err(|error| error.to_string())?;
+    let instructions = match enable {
+        "bash" => format!(
+            "\nTo enable completions, add this to your ~/.bashrc:\nsource {}\n\nThen restart your shell or run:\nsource ~/.bashrc\n\n",
+            path.display()
+        ),
+        "zsh" => format!(
+            "\nTo enable completions, ensure the directory is in your fpath.\nAdd this to your ~/.zshrc:\nfpath=({} $fpath)\nautoload -Uz compinit && compinit\n\nThen restart your shell or run:\nsource ~/.zshrc\n\n",
+            path.parent().unwrap_or(&path).display()
+        ),
+        _ => "\nCompletions should be automatically loaded by fish.\nRestart your shell or run:\nexec fish\n\n".to_owned(),
+    };
+    Ok((path, instructions))
+}
+
+fn config_display(c: &Config, key: &str) -> String {
+    match key {
+        "projectName" => c.project_name.clone(),
+        "defaultEditor" => c
+            .default_editor
+            .clone()
+            .filter(|s| !s.is_empty())
+            .unwrap_or("(not set)".into()),
+        "defaultAssignee" => c.default_assignee.clone().unwrap_or_default().join(", "),
+        "defaultStatus" => c
+            .default_status
+            .clone()
+            .filter(|s| !s.is_empty())
+            .unwrap_or("(not set)".into()),
+        "statuses" => c.statuses.join(", "),
+        "labels" => c.labels.join(", "),
+        "priorities" => c
+            .priorities
+            .clone()
+            .unwrap_or_else(|| vec!["High".into(), "Medium".into(), "Low".into()])
+            .join(", "),
+        "types" => c
+            .types
+            .clone()
+            .unwrap_or_else(|| {
+                vec![
+                    "bug".into(),
+                    "feature".into(),
+                    "enhancement".into(),
+                    "task".into(),
+                    "chore".into(),
+                    "docs".into(),
+                    "spike".into(),
+                ]
+            })
+            .join(", "),
+        "projects" => c.projects.clone().unwrap_or_default().join(", "),
+        "milestones" => "[]".into(),
+        "definitionOfDone" => c.definition_of_done.clone().unwrap_or_default().join(" | "),
+        "dateFormat" => c.date_format.clone(),
+        "maxColumnWidth" => c
+            .max_column_width
+            .map(num_string)
+            .unwrap_or("(not set)".into()),
+        "autoOpenBrowser" => c
+            .auto_open_browser
+            .map(|v| v.to_string())
+            .unwrap_or("(not set)".into()),
+        "hideEmptyColumns" => c
+            .hide_empty_columns
+            .map(|v| v.to_string())
+            .unwrap_or("(not set)".into()),
+        "defaultPort" => c.default_port.map(num_string).unwrap_or("(not set)".into()),
+        "remoteOperations" => c
+            .remote_operations
+            .map(|v| v.to_string())
+            .unwrap_or("(not set)".into()),
+        "autoCommit" => c
+            .auto_commit
+            .map(|v| v.to_string())
+            .unwrap_or("(not set)".into()),
+        "filesystemOnly" => c.filesystem_only.unwrap_or(false).to_string(),
+        "bypassGitHooks" => c
+            .bypass_git_hooks
+            .map(|v| v.to_string())
+            .unwrap_or("(not set)".into()),
+        "zeroPaddedIds" => c
+            .zero_padded_ids
+            .filter(|v| *v != 0.0)
+            .map(|v| format!("{} digits", num_string(v)))
+            .unwrap_or("(disabled)".into()),
+        "checkActiveBranches" => c.check_active_branches.unwrap_or(true).to_string(),
+        "activeBranchDays" => c.active_branch_days.map(num_string).unwrap_or("30".into()),
+        _ => String::new(),
+    }
+}
+
+fn run_agents_update() -> Result<(), String> {
+    let context = project_context()?;
+    if context.config_path.is_none() {
+        return Err("No backlog project found. Initialize one first with: backlog init".into());
+    }
+    write_stdout(
+        "Select agent instruction files to update (enter comma-separated names): CLAUDE.md, AGENTS.md, GEMINI.md, .github/copilot-instructions.md\n",
+    )?;
+    let mut selection = String::new();
+    io::stdin()
+        .read_line(&mut selection)
+        .map_err(|e| e.to_string())?;
+    let selected: Vec<&str> = selection
+        .trim()
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    if selected.is_empty() {
+        return write_stdout("No files selected for update.\n");
+    }
+    const NUDGE: &str = include_str!("../../src/guidelines/cli-agent-nudge.md");
+    let nudge = NUDGE.trim();
+    let version = env!("CARGO_PKG_VERSION");
+    let names = [
+        "CLAUDE.md",
+        "AGENTS.md",
+        "GEMINI.md",
+        ".github/copilot-instructions.md",
+    ];
+    let mut changed = Vec::new();
+    for name in &selected {
+        if !names.contains(name) {
+            return Err(format!("Unknown instruction file: {name}"));
+        }
+        let path = context.root.join(name);
+        let exists = path.exists();
+        let original = if exists {
+            fs::read_to_string(&path).map_err(|e| e.to_string())?
+        } else {
+            String::new()
+        };
+        let mut content = original.clone();
+        let (mcp_stripped, _, _) = strip_managed(&content, "BACKLOG.MD MCP GUIDELINES");
+        content = mcp_stripped;
+        let (stripped, removed, insertion) = strip_managed(&content, "BACKLOG.MD GUIDELINES");
+        let mut content = stripped;
+        if !removed && content.contains("<!-- BACKLOG.MD GUIDELINES START -->") {
+            continue;
+        }
+        let block = format!(
+            "\n<!-- BACKLOG.MD GUIDELINES START -->\n<!-- backlog.md-instructions-version: {version} -->\n{nudge}\n<!-- BACKLOG.MD GUIDELINES END -->\n"
+        );
+        let updated = if removed {
+            let at = insertion.unwrap_or(content.len()).min(content.len());
+            content.insert_str(at, &block);
+            content
+        } else {
+            if !content.is_empty() && !content.ends_with('\n') {
+                content.push('\n');
+            }
+            content.push_str(&block);
+            content
+        };
+        if updated == original {
+            continue;
+        }
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        fs::write(&path, updated).map_err(|e| e.to_string())?;
+        changed.push((name.to_string(), path));
+    }
+    if context.config.auto_commit == Some(true)
+        && context.config.filesystem_only != Some(true)
+        && !changed.is_empty()
+    {
+        let paths: Vec<PathBuf> = changed.iter().map(|(_, path)| path.clone()).collect();
+        commit_record_change(&context, "Add AI agent instructions", &paths)?;
+    }
+    if changed.is_empty() {
+        return write_stdout(&format!(
+            "Updated {} agent instruction file(s): {}\n",
+            selected.len(),
+            selected.join(", ")
+        ));
+    }
+    write_stdout(&format!(
+        "Updated {} agent instruction file(s): {}\n",
+        selected.len(),
+        selected.join(", ")
+    ))
+}
+
+fn strip_managed(content: &str, label: &str) -> (String, bool, Option<usize>) {
+    let start = format!("<!-- {label} START -->");
+    let end = format!("<!-- {label} END -->");
+    let mut result = content.to_owned();
+    let mut first = None;
+    let mut removed = false;
+    while let Some(si) = result.find(&start) {
+        let Some(ei0) = result[si..].find(&end) else {
+            break;
+        };
+        let ei = si + ei0 + end.len();
+        let mut rs = si;
+        while rs > 0 && matches!(result.as_bytes()[rs - 1], b' ' | b'\t') {
+            rs -= 1;
+        }
+        if rs > 0 && result.as_bytes()[rs - 1] == b'\n' {
+            rs -= 1;
+            if rs > 0 && result.as_bytes()[rs - 1] == b'\r' {
+                rs -= 1;
+            }
+        }
+        let mut re = ei;
+        if result.as_bytes().get(re) == Some(&b'\r') {
+            re += 1;
+        }
+        if result.as_bytes().get(re) == Some(&b'\n') {
+            re += 1;
+        }
+        first.get_or_insert(rs);
+        result.replace_range(rs..re, "");
+        removed = true;
+    }
+    (result, removed, first)
 }
 
 fn run_task_view(task_id: &str, options: TaskViewArgs) -> Result<(), String> {
@@ -5848,4 +7050,25 @@ fn write_stderr(value: &str) -> Result<(), String> {
         .lock()
         .write_all(value.as_bytes())
         .map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+mod editor_lookup_tests {
+    use super::editor_candidate_names;
+
+    #[test]
+    fn windows_editor_lookup_uses_pathext_order_and_respects_explicit_extensions() {
+        assert_eq!(
+            editor_candidate_names("notepad", ".EXE;.CMD;.BAT", true),
+            ["notepad.EXE", "notepad.CMD", "notepad.BAT"]
+        );
+        assert_eq!(
+            editor_candidate_names("notepad.exe", ".CMD;.EXE", true),
+            ["notepad.exe"]
+        );
+        assert_eq!(
+            editor_candidate_names("notepad", ".EXE;.CMD", false),
+            ["notepad"]
+        );
+    }
 }

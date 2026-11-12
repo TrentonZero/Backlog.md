@@ -49,6 +49,38 @@ fn rust_cli(args: &[&str], cwd: &std::path::Path) -> Output {
         .unwrap()
 }
 
+fn rust_cli_with_input(args: &[&str], cwd: &std::path::Path, input: &str) -> Output {
+    rust_cli_with_env_input(args, cwd, input, &[])
+}
+
+fn rust_cli_with_env_input(
+    args: &[&str],
+    cwd: &std::path::Path,
+    input: &str,
+    env: &[(&str, &std::path::Path)],
+) -> Output {
+    use std::io::Write;
+    let binary = env!("CARGO_BIN_EXE_backlog");
+    let mut command = Command::new(binary);
+    command
+        .args(args)
+        .current_dir(cwd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    let mut child = command.spawn().unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(input.as_bytes())
+        .unwrap();
+    child.wait_with_output().unwrap()
+}
+
 fn typescript_cli(args: &[&str], cwd: &std::path::Path) -> Output {
     let bun = std::env::var_os("BACKLOG_REFERENCE_BUN").unwrap_or_else(|| "bun".into());
     let cli = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -850,7 +882,7 @@ fn rust_task_lifecycle_commits_symlink_paths_without_committing_their_targets() 
         ] {
             fixture.file(
                 "backlog.config.yml",
-                "project_name: CLI Fixture\ntask_prefix: task\nstatuses:\n  - To Do\n  - Done\nauto_commit: true\n",
+                "project_name: CLI Fixture\ntask_prefix: task\nstatuses:\n  - To Do\n  - Done\ndefault_port: 6420\nauto_open_browser: true\nremote_operations: true\nauto_commit: true\n",
             );
             let task_path = fixture.0.join("backlog/tasks/task-1-first.md");
             fixture.file(
@@ -912,7 +944,7 @@ fn rust_task_edit_auto_commit_matches_typescript_and_keeps_unrelated_staged_work
     for fixture in [&expected_fixture, &actual_fixture] {
         fixture.file(
             "backlog.config.yml",
-            "project_name: CLI Fixture\ntask_prefix: task\nstatuses:\n  - To Do\n  - Done\nauto_commit: true\n",
+            "project_name: CLI Fixture\ntask_prefix: task\nstatuses:\n  - To Do\n  - Done\ndefault_port: 6420\nauto_open_browser: true\nremote_operations: true\nauto_commit: true\n",
         );
         fixture.file(
             "backlog/tasks/task-1-first.md",
@@ -950,7 +982,7 @@ fn rust_task_edit_through_a_committed_symlink_updates_and_commits_its_target() {
     for fixture in [&expected_fixture, &actual_fixture] {
         fixture.file(
             "backlog.config.yml",
-            "project_name: CLI Fixture\ntask_prefix: task\nstatuses:\n  - To Do\n  - Done\nauto_commit: true\n",
+            "project_name: CLI Fixture\ntask_prefix: task\nstatuses:\n  - To Do\n  - Done\ndefault_port: 6420\nauto_open_browser: true\nremote_operations: true\nauto_commit: true\n",
         );
         let task_path = fixture.0.join("backlog/tasks/task-1-linked.md");
         let source =
@@ -1001,7 +1033,7 @@ fn rust_task_edit_through_an_uncommitted_symlink_matches_typescript() {
     for fixture in [&expected_fixture, &actual_fixture] {
         fixture.file(
             "backlog.config.yml",
-            "project_name: CLI Fixture\ntask_prefix: task\nstatuses:\n  - To Do\n  - Done\nauto_commit: true\n",
+            "project_name: CLI Fixture\ntask_prefix: task\nstatuses:\n  - To Do\n  - Done\ndefault_port: 6420\nauto_open_browser: true\nremote_operations: true\nauto_commit: true\n",
         );
         let task_path = fixture.0.join("backlog/tasks/task-1-linked.md");
         let contents =
@@ -1268,7 +1300,7 @@ fn rust_draft_edit_title_rename_auto_commits_both_paths_and_keeps_unrelated_stag
     for fixture in [&expected_fixture, &actual_fixture] {
         fixture.file(
             "backlog.config.yml",
-            "project_name: CLI Fixture\ntask_prefix: task\nstatuses:\n  - To Do\n  - Done\nauto_commit: true\n",
+            "project_name: CLI Fixture\ntask_prefix: task\nstatuses:\n  - To Do\n  - Done\ndefault_port: 6420\nauto_open_browser: true\nremote_operations: true\nauto_commit: true\n",
         );
         fixture.file(
             "backlog/drafts/draft-1-first.md",
@@ -3248,6 +3280,532 @@ fn rust_cli_help_and_version_are_available_without_a_project() {
             }
         }
     }
+}
+
+#[test]
+fn rust_config_commands_match_typescript_values_and_preserve_unknown_source() {
+    let reference = Fixture::new();
+    let candidate = Fixture::new();
+    for fixture in [&reference, &candidate] {
+        fixture.file("backlog/tasks/.keep", "");
+        fixture.file(
+            "backlog.config.yml",
+            "# Keep this comment\nproject_name: CLI Fixture\ntask_prefix: task\nstatuses:\n  - To Do\n  - Done\nmax_column_width: 80\nauto_commit: true\ncustom_unknown_key: keep-me\n",
+        );
+    }
+
+    for args in [
+        vec!["config", "get", "defaultEditor"],
+        vec!["config", "get", "projectName"],
+        vec!["config", "get", "defaultAssignee"],
+        vec!["config", "get", "statuses"],
+        vec!["config", "get", "maxColumnWidth"],
+        vec!["config", "get", "autoCommit"],
+        vec!["config", "get", "milestones"],
+        vec!["config", "get", "defaultPort"],
+        vec!["config", "list"],
+        vec!["config", "set", "defaultAssignee", "@alice,@bob"],
+        vec!["config", "set", "defaultPort", "7001"],
+        vec!["config", "set", "autoOpenBrowser", "yes"],
+        vec!["config", "set", "defaultPort", "7002suffix"],
+        vec!["config", "set", "hideEmptyColumns", "1"],
+        vec!["config", "set", "checkActiveBranches", "no"],
+        vec!["config", "set", "defaultEditor", "sh --version"],
+        vec!["config", "get", "defaultEditor"],
+        vec!["config", "set", "filesystemOnly", "yes"],
+        vec!["config", "get", "checkActiveBranches"],
+        vec!["config", "get", "remoteOperations"],
+        vec!["config", "get", "autoCommit"],
+        vec!["config", "get", "bypassGitHooks"],
+        vec!["config", "get", "defaultAssignee"],
+        vec!["config", "get", "defaultPort"],
+        vec!["config", "get", "autoOpenBrowser"],
+    ] {
+        assert_cli_process_parity(&args, &reference, &candidate);
+    }
+
+    for args in [
+        vec!["config", "set", "defaultPort", "65536"],
+        vec!["config", "set", "maxColumnWidth", "0"],
+        vec![
+            "config",
+            "set",
+            "defaultEditor",
+            "backlog-command-that-does-not-exist",
+        ],
+        vec!["config", "set", "autoCommit", "maybe"],
+        vec!["config", "set", "priorities", "High"],
+        vec!["config", "get", "notAKey"],
+        vec!["config", "set", "notAKey", "value"],
+    ] {
+        assert_cli_process_parity(&args, &reference, &candidate);
+    }
+
+    let source = std::fs::read_to_string(candidate.0.join("backlog.config.yml")).unwrap();
+    assert!(source.contains("# Keep this comment"));
+    assert!(source.contains("custom_unknown_key: keep-me"));
+    assert!(source.contains("project_name: CLI Fixture"));
+    assert!(source.contains("default_port: 7002"), "{source}");
+    assert!(source.contains("default_assignee:"), "{source}");
+    assert!(source.contains("'@alice'"), "{source}");
+    assert!(source.contains("'@bob'"), "{source}");
+}
+
+#[test]
+fn rust_config_list_matches_typescript_migrated_defaults() {
+    let reference = Fixture::new();
+    let candidate = Fixture::new();
+    for fixture in [&reference, &candidate] {
+        fixture.file("backlog/tasks/.keep", "");
+        fixture.file(
+            "backlog.config.yml",
+            "project_name: CLI Fixture\ntask_prefix: task\n",
+        );
+    }
+
+    assert_cli_process_parity(&["config", "list"], &reference, &candidate);
+    assert_cli_process_parity(&["config", "get", "defaultPort"], &reference, &candidate);
+    assert_cli_process_parity(
+        &["config", "get", "autoOpenBrowser"],
+        &reference,
+        &candidate,
+    );
+    assert_cli_process_parity(
+        &["config", "get", "remoteOperations"],
+        &reference,
+        &candidate,
+    );
+}
+
+#[test]
+fn rust_legacy_config_commands_persist_migration_defaults_and_preserve_source() {
+    let reference = Fixture::new();
+    let candidate = Fixture::new();
+    for fixture in [&reference, &candidate] {
+        fixture.file("backlog/tasks/.keep", "");
+        fixture.file(
+            "backlog.config.yml",
+            "# Preserve this legacy comment\nproject_name: Legacy project\ntask_prefix: task\ncustom_unknown_key: keep-me\n",
+        );
+    }
+
+    assert_cli_process_parity(&["config", "get", "autoCommit"], &reference, &candidate);
+    let source = std::fs::read_to_string(candidate.0.join("backlog.config.yml")).unwrap();
+    assert!(
+        source.contains("# Preserve this legacy comment"),
+        "{source}"
+    );
+    assert!(source.contains("custom_unknown_key: keep-me"), "{source}");
+    for expected in [
+        "project_name: Legacy project",
+        "statuses:",
+        "default_port: 6420",
+        "auto_open_browser: true",
+        "remote_operations: true",
+        "auto_commit: false",
+    ] {
+        assert!(
+            source.contains(expected),
+            "missing {expected:?} in:\n{source}"
+        );
+    }
+}
+
+#[test]
+fn rust_config_migration_skips_init_help_and_version_invocations() {
+    let fixture = Fixture::new();
+    fixture.file("backlog/tasks/.keep", "");
+    fixture.file(
+        "backlog.config.yml",
+        "# Legacy config\nproject_name: Legacy project\ntask_prefix: task\ncustom_unknown_key: keep-me\n",
+    );
+    let original = std::fs::read_to_string(fixture.0.join("backlog.config.yml")).unwrap();
+    for args in [&["--help"][..], &["--version"][..], &["init"][..]] {
+        let _ = rust_cli(args, &fixture.0);
+        assert_eq!(
+            std::fs::read_to_string(fixture.0.join("backlog.config.yml")).unwrap(),
+            original
+        );
+    }
+}
+
+#[test]
+fn rust_legacy_migration_preserves_empty_project_name_and_missing_prefix() {
+    let reference = Fixture::new();
+    let candidate = Fixture::new();
+    for fixture in [&reference, &candidate] {
+        std::fs::remove_file(fixture.0.join("backlog.config.yml")).unwrap();
+        fixture.file("backlog/tasks/.keep", "");
+        fixture.file(
+            "backlog/config.yml",
+            "# Preserve legacy source\ncustom_unknown_key: keep-me\n",
+        );
+    }
+
+    assert_cli_process_parity(&["config", "list"], &reference, &candidate);
+    let source = std::fs::read_to_string(candidate.0.join("backlog/config.yml")).unwrap();
+    let parsed: serde_json::Value = serde_yaml_ng::from_str(&source).unwrap();
+    assert_eq!(parsed["project_name"], "");
+    assert!(parsed.get("task_prefix").is_none(), "{source}");
+    assert!(source.contains("custom_unknown_key: keep-me"), "{source}");
+}
+
+#[test]
+fn rust_legacy_migration_omits_empty_task_prefix_like_typescript() {
+    let reference = Fixture::new();
+    let candidate = Fixture::new();
+    for fixture in [&reference, &candidate] {
+        std::fs::remove_file(fixture.0.join("backlog.config.yml")).unwrap();
+        fixture.file("backlog/tasks/.keep", "");
+        fixture.file(
+            "backlog/config.yml",
+            "# Preserve this comment\nproject_name: Legacy project\ntask_prefix: \"\"\ncustom_unknown_key: keep-me\n",
+        );
+    }
+
+    assert_cli_process_parity(&["config", "list"], &reference, &candidate);
+    let source = std::fs::read_to_string(candidate.0.join("backlog/config.yml")).unwrap();
+    let parsed: serde_json::Value = serde_yaml_ng::from_str(&source).unwrap();
+    assert!(parsed.get("task_prefix").is_none(), "{source}");
+    assert!(source.contains("# Preserve this comment"), "{source}");
+    assert!(source.contains("custom_unknown_key: keep-me"), "{source}");
+}
+
+#[test]
+fn rust_global_migration_does_not_trigger_only_for_missing_project_name_or_statuses() {
+    let reference = Fixture::new();
+    let candidate = Fixture::new();
+    for fixture in [&reference, &candidate] {
+        std::fs::remove_file(fixture.0.join("backlog.config.yml")).unwrap();
+        fixture.file("backlog/tasks/.keep", "");
+        fixture.file(
+            "backlog/config.yml",
+            "# Keep legacy source unchanged\ntask_prefix: task\ndefault_port: 6420\nauto_open_browser: true\nremote_operations: true\nauto_commit: false\ncustom_unknown_key: keep-me\n",
+        );
+    }
+
+    assert_cli_process_parity(&["config", "list"], &reference, &candidate);
+    let expected = std::fs::read_to_string(reference.0.join("backlog/config.yml")).unwrap();
+    let actual = std::fs::read_to_string(candidate.0.join("backlog/config.yml")).unwrap();
+    assert_eq!(actual, expected);
+    assert!(actual.contains("# Keep legacy source unchanged"));
+    assert!(actual.contains("custom_unknown_key: keep-me"));
+    assert!(!actual.contains("project_name:"));
+    assert!(!actual.contains("statuses:"));
+}
+
+#[test]
+fn rust_global_migration_moves_legacy_milestones_without_schema_migration() {
+    let reference = Fixture::new();
+    let candidate = Fixture::new();
+    for fixture in [&reference, &candidate] {
+        fixture.file("backlog/tasks/.keep", "");
+        fixture.file(
+            "backlog.config.yml",
+            "# Preserve this comment\nproject_name: CLI Fixture\ntask_prefix: task\nstatuses: [To Do, In Progress, Done]\ndefault_port: 6420\nauto_open_browser: true\nremote_operations: true\nauto_commit: false\nmilestones: [Alpha, Beta]\ncustom_unknown_key: retain\n",
+        );
+    }
+
+    assert_cli_process_parity(&["config", "list"], &reference, &candidate);
+    let reference_config = std::fs::read_to_string(reference.0.join("backlog.config.yml")).unwrap();
+    let candidate_config = std::fs::read_to_string(candidate.0.join("backlog.config.yml")).unwrap();
+    let parsed: serde_json::Value = serde_yaml_ng::from_str(&candidate_config).unwrap();
+    assert!(parsed.get("milestones").is_none(), "{candidate_config}");
+    assert!(
+        candidate_config.contains("# Preserve this comment"),
+        "{candidate_config}"
+    );
+    assert!(
+        candidate_config.contains("custom_unknown_key: retain"),
+        "{candidate_config}"
+    );
+    assert!(
+        !reference_config.contains("milestones:"),
+        "{reference_config}"
+    );
+    let reference_milestones = std::fs::read_dir(reference.0.join("backlog/milestones"))
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name())
+        .collect::<Vec<_>>();
+    let candidate_milestones = std::fs::read_dir(candidate.0.join("backlog/milestones"))
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name())
+        .collect::<Vec<_>>();
+    assert_eq!(candidate_milestones.len(), 2);
+    assert_eq!(candidate_milestones.len(), reference_milestones.len());
+}
+
+#[test]
+fn rust_global_migration_preserves_empty_legacy_milestone_values_without_schema_trigger() {
+    for milestones in ["milestones: \"\"\n", "milestones: [\"\"]\n"] {
+        let reference = Fixture::new();
+        let candidate = Fixture::new();
+        for fixture in [&reference, &candidate] {
+            fixture.file("backlog/tasks/.keep", "");
+            fixture.file(
+                "backlog.config.yml",
+                &format!(
+                    "# Keep empty legacy values\nproject_name: CLI Fixture\ntask_prefix: task\nstatuses: [To Do, In Progress, Done]\ndefault_port: 6420\nauto_open_browser: true\nremote_operations: true\nauto_commit: false\n{milestones}custom_unknown_key: retain\n"
+                ),
+            );
+        }
+
+        assert_cli_process_parity(&["config", "list"], &reference, &candidate);
+        let expected = std::fs::read_to_string(reference.0.join("backlog.config.yml")).unwrap();
+        let actual = std::fs::read_to_string(candidate.0.join("backlog.config.yml")).unwrap();
+        assert_eq!(actual, expected);
+        assert!(actual.contains("milestones:"), "{actual}");
+        assert!(actual.contains("# Keep empty legacy values"), "{actual}");
+        assert!(actual.contains("custom_unknown_key: retain"), "{actual}");
+    }
+}
+
+#[test]
+fn rust_schema_migration_removes_empty_legacy_milestones_only_when_triggered() {
+    for (name, trigger_fields, should_remove) in [
+        (
+            "schema-migration",
+            "auto_open_browser: true\nremote_operations: true\nauto_commit: false\n",
+            true,
+        ),
+        (
+            "no-schema-migration",
+            "default_port: 6420\nauto_open_browser: true\nremote_operations: true\nauto_commit: false\n",
+            false,
+        ),
+    ] {
+        for milestones in ["milestones: []\n", "milestones:\n"] {
+            let reference = Fixture::new();
+            let candidate = Fixture::new();
+            for fixture in [&reference, &candidate] {
+                fixture.file("backlog/tasks/.keep", "");
+                fixture.file(
+                    "backlog.config.yml",
+                    &format!(
+                        "# Preserve config\nproject_name: CLI Fixture\ntask_prefix: task\nstatuses: [To Do, In Progress, Done]\n{trigger_fields}{milestones}custom_unknown_key: retain\n"
+                    ),
+                );
+            }
+
+            assert_cli_process_parity(&["config", "list"], &reference, &candidate);
+            let source = std::fs::read_to_string(candidate.0.join("backlog.config.yml")).unwrap();
+            let parsed: serde_json::Value = serde_yaml_ng::from_str(&source).unwrap();
+            assert_eq!(
+                parsed.get("milestones").is_none(),
+                should_remove,
+                "{name}: {source}"
+            );
+            assert!(source.contains("# Preserve config"), "{name}: {source}");
+            assert!(
+                source.contains("custom_unknown_key: retain"),
+                "{name}: {source}"
+            );
+        }
+    }
+}
+
+#[test]
+fn rust_config_set_preserves_typescript_no_auto_commit_behavior() {
+    let reference = Fixture::new();
+    let candidate = Fixture::new();
+    for fixture in [&reference, &candidate] {
+        fixture.file("backlog/tasks/.keep", "");
+        fixture.file(
+            "backlog.config.yml",
+            "project_name: CLI Fixture\ntask_prefix: task\nauto_commit: true\n",
+        );
+        initialize_git_fixture(fixture);
+    }
+    let reference_head = git(&reference.0, &["rev-parse", "HEAD"]);
+    let candidate_head = git(&candidate.0, &["rev-parse", "HEAD"]);
+    assert_cli_process_parity(
+        &["config", "set", "projectName", "Changed"],
+        &reference,
+        &candidate,
+    );
+    assert_eq!(git(&reference.0, &["rev-parse", "HEAD"]), reference_head);
+    assert_eq!(git(&candidate.0, &["rev-parse", "HEAD"]), candidate_head);
+    assert!(!git(&reference.0, &["status", "--porcelain"]).is_empty());
+    assert!(!git(&candidate.0, &["status", "--porcelain"]).is_empty());
+}
+
+#[test]
+fn rust_config_wizard_persists_interactive_settings_and_dod_edits() {
+    let fixture = Fixture::new();
+    fixture.file("backlog/tasks/.keep", "");
+    let answers = "n\nn\ny\ny\ny\n4\nsh\n1\nShip release notes\n5\ny\n7007\nn\ny\n";
+    let output = rust_cli_with_input(&["config"], &fixture.0, answers);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let source = std::fs::read_to_string(fixture.0.join("backlog.config.yml")).unwrap();
+    let parsed: serde_json::Value = serde_yaml_ng::from_str(&source).unwrap();
+    assert_eq!(parsed["check_active_branches"], false);
+    assert_eq!(parsed["remote_operations"], false);
+    assert_eq!(parsed["bypass_git_hooks"], true);
+    assert_eq!(parsed["auto_commit"], true);
+    assert_eq!(parsed["zero_padded_ids"], 4.0);
+    assert_eq!(parsed["default_editor"], "sh");
+    assert_eq!(parsed["definition_of_done"][0], "Ship release notes");
+    assert_eq!(parsed["default_port"], 7007.0);
+    assert_eq!(parsed["auto_open_browser"], false);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Advanced configuration updated."),
+        "{stdout}"
+    );
+    assert!(stdout.contains("Shell completions: skipped"), "{stdout}");
+    let claude_agent =
+        std::fs::read_to_string(fixture.0.join(".claude/agents/project-manager-backlog.md"))
+            .unwrap();
+    assert!(claude_agent.contains("backlog.md-instructions-version: 1.55.3"));
+}
+
+#[test]
+fn rust_config_wizard_clears_editor_and_reprompts_for_disabled_dod_actions() {
+    let fixture = Fixture::new();
+    fixture.file("backlog/tasks/.keep", "");
+    fixture.file(
+        "backlog.config.yml",
+        "project_name: CLI Fixture\ntask_prefix: task\ndefault_editor: sh\ndefinition_of_done: []\n",
+    );
+    let answers = "n\nn\nn\nn\nn\n\n2\n5\nn\nn\n";
+    let output = rust_cli_with_input(&["config"], &fixture.0, answers);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let source = std::fs::read_to_string(fixture.0.join("backlog.config.yml")).unwrap();
+    let parsed: serde_json::Value = serde_yaml_ng::from_str(&source).unwrap();
+    assert!(parsed.get("default_editor").is_none(), "{source}");
+    assert!(parsed.get("definition_of_done").is_none(), "{source}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("Choose one of the available actions.")
+    );
+}
+
+#[test]
+fn rust_config_wizard_installs_bash_completion_in_the_user_home() {
+    let fixture = Fixture::new();
+    fixture.file("backlog/tasks/.keep", "");
+    let home = fixture.0.join("home");
+    std::fs::create_dir(&home).unwrap();
+    let answers = "y\nn\nn\nn\nn\n\n5\nn\nn\n";
+    let output = rust_cli_with_env_input(
+        &["config"],
+        &fixture.0,
+        answers,
+        &[
+            ("SHELL", std::path::Path::new("/bin/bash")),
+            ("HOME", &home),
+        ],
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let installed = home.join(".local/share/bash-completion/completions/backlog");
+    let content = std::fs::read_to_string(installed).unwrap();
+    assert!(content.contains("_backlog()"));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Shell completions: installed to"));
+}
+
+#[test]
+fn rust_config_set_edits_selected_folder_config_without_rewriting_it() {
+    let reference = Fixture::new();
+    let candidate = Fixture::new();
+    for fixture in [&reference, &candidate] {
+        std::fs::remove_file(fixture.0.join("backlog.config.yml")).unwrap();
+        fixture.file("backlog/tasks/.keep", "");
+        fixture.file("backlog/config.yml", "# folder config comment\nproject_name: CLI Fixture\ntask_prefix: task\ncustom_unknown_key: retain\n");
+    }
+    assert_cli_process_parity(
+        &["config", "set", "defaultStatus", "Done"],
+        &reference,
+        &candidate,
+    );
+    assert_cli_process_parity(&["config", "get", "defaultStatus"], &reference, &candidate);
+    let source = std::fs::read_to_string(candidate.0.join("backlog/config.yml")).unwrap();
+    assert!(source.contains("# folder config comment"));
+    assert!(source.contains("custom_unknown_key: retain"));
+    assert!(source.contains("default_status: Done"), "{source}");
+}
+
+#[test]
+fn rust_agents_instruction_update_preserves_surrounding_content_and_reports_actions() {
+    let fixture = Fixture::new();
+    fixture.file("backlog/tasks/.keep", "");
+    fixture.file("AGENTS.md", "Before instructions.\n\n<!-- BACKLOG.MD MCP GUIDELINES START -->\nold MCP block\n<!-- BACKLOG.MD MCP GUIDELINES END -->\n\n<!-- BACKLOG.MD GUIDELINES START -->\nold block\n<!-- BACKLOG.MD GUIDELINES END -->\n\nAfter instructions.\n");
+
+    let first = rust_cli_with_input(
+        &["agents", "--update-instructions"],
+        &fixture.0,
+        "AGENTS.md\n",
+    );
+    assert_eq!(first.status.code(), Some(0));
+    let output = String::from_utf8_lossy(&first.stdout);
+    assert!(output.contains("Updated 1 agent instruction file(s): AGENTS.md"));
+    let content = std::fs::read_to_string(fixture.0.join("AGENTS.md")).unwrap();
+    assert!(content.starts_with("Before instructions."));
+    assert!(content.contains("<!-- BACKLOG.MD GUIDELINES START -->"));
+    assert!(content.contains("<!-- backlog.md-instructions-version:"));
+    assert!(content.contains("## Backlog.md Workflow"));
+    assert!(!content.contains("old MCP block"));
+    assert!(content.ends_with("After instructions.\n"));
+
+    let second = rust_cli_with_input(
+        &["agents", "--update-instructions"],
+        &fixture.0,
+        "AGENTS.md\n",
+    );
+    assert_eq!(second.status.code(), Some(0));
+    assert!(
+        String::from_utf8_lossy(&second.stdout)
+            .contains("Updated 1 agent instruction file(s): AGENTS.md")
+    );
+    assert_eq!(
+        std::fs::read_to_string(fixture.0.join("AGENTS.md")).unwrap(),
+        content
+    );
+}
+
+#[test]
+fn rust_agents_instruction_update_commits_only_selected_changed_files_when_enabled() {
+    let fixture = Fixture::new();
+    fixture.file("backlog/tasks/.keep", "");
+    fixture.file(
+        "backlog.config.yml",
+        "project_name: CLI Fixture\ntask_prefix: task\nstatuses:\n  - To Do\n  - In Progress\n  - Done\ndefault_port: 6420\nauto_open_browser: true\nremote_operations: true\nauto_commit: true\n",
+    );
+    initialize_git_fixture(&fixture);
+    let empty = rust_cli_with_input(&["agents", "--update-instructions"], &fixture.0, "\n");
+    assert!(String::from_utf8_lossy(&empty.stdout).contains("No files selected for update."));
+    assert_eq!(git(&fixture.0, &["rev-list", "--count", "HEAD"]), "1");
+    let output = rust_cli_with_input(
+        &["agents", "--update-instructions"],
+        &fixture.0,
+        "AGENTS.md\n",
+    );
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        git(&fixture.0, &["log", "-1", "--pretty=%s"]),
+        "Add AI agent instructions"
+    );
+    assert_eq!(
+        git(&fixture.0, &["show", "--pretty=", "--name-only", "HEAD"]),
+        "AGENTS.md"
+    );
+    let status = git(&fixture.0, &["status", "--porcelain"]);
+    assert_eq!(status, "A  UNRELATED.txt");
 }
 
 #[test]

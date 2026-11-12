@@ -1,8 +1,11 @@
 //! Sparse stored configuration. Initialization and migration defaults belong to explicit callers.
 use crate::frontmatter::{FrontmatterError, parse_yaml_mapping};
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
+use yaml_edit::YamlFile;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Config {
@@ -481,6 +484,46 @@ pub fn parse_config(source: &str, path: &Path) -> Result<Config, ConfigValueErro
         config.date_format = "yyyy-mm-dd".into();
     }
     Ok(config)
+}
+
+/// Change selected YAML keys while retaining comments and unrelated source entries.
+pub fn update_config_source(
+    source: &str,
+    changes: &BTreeMap<String, Option<Value>>,
+) -> Result<String, String> {
+    let yaml = if source.trim().is_empty() {
+        "{}\n"
+    } else {
+        source
+    };
+    let syntax = YamlFile::from_str(yaml).map_err(|error| error.to_string())?;
+    let document = syntax
+        .documents()
+        .next()
+        .ok_or("Configuration must be a YAML mapping")?;
+    let mapping = document
+        .as_mapping()
+        .ok_or("Configuration must be a YAML mapping")?;
+    for (key, value) in changes {
+        match value {
+            Some(value) => {
+                let replacement = serde_yaml_ng::to_string(&BTreeMap::from([("value", value)]))
+                    .map_err(|error| error.to_string())?;
+                let replacement =
+                    YamlFile::from_str(&replacement).map_err(|error| error.to_string())?;
+                let node = replacement
+                    .documents()
+                    .next()
+                    .and_then(|document| document.get("value"))
+                    .ok_or("Configuration must be a YAML mapping")?;
+                mapping.set(key.as_str(), node);
+            }
+            None => {
+                mapping.remove(key.as_str());
+            }
+        }
+    }
+    Ok(syntax.to_string())
 }
 
 fn quoted_list(items: &[String], escape: bool) -> String {
