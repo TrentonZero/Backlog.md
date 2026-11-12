@@ -18,6 +18,7 @@ pub mod readiness;
 pub mod records;
 pub mod sections;
 pub mod serialization;
+pub mod statistics;
 pub mod storage;
 pub mod task_detail;
 pub mod task_file_ids;
