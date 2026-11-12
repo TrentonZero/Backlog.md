@@ -4,7 +4,8 @@ use crate::{
     config::{Config, parse_config},
     dependency_graph::{DependencyGraph, DependencyGraphNode},
     discovery::{find_project_root, resolve_backlog_directory},
-    identity::{canonical_task_id, task_ids_equal},
+    draft_store::DraftStore,
+    identity::{canonical_task_id, normalize_task_id, task_ids_equal},
     milestone_store::MilestoneStore,
     records::TaskRecord,
     sections::{ChecklistKind, Criterion},
@@ -38,6 +39,39 @@ enum Command {
         #[command(subcommand)]
         command: TaskCommand,
     },
+    /// Draft commands.
+    Draft {
+        #[command(subcommand)]
+        command: DraftCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum DraftCommand {
+    /// List local drafts.
+    List(DraftListArgs),
+}
+
+#[derive(Debug, Args)]
+struct DraftListArgs {
+    /// Use human-readable text output.
+    #[arg(long)]
+    plain: bool,
+    /// Use versioned JSON output.
+    #[arg(long)]
+    json: bool,
+    /// Sort drafts by priority, ID, or ordinal.
+    #[arg(long)]
+    sort: Option<String>,
+    /// Print at most this many drafts after sorting.
+    #[arg(long, allow_hyphen_values = true)]
+    max_count: Option<String>,
+    /// Leave out this many drafts after sorting.
+    #[arg(long, allow_hyphen_values = true)]
+    skip: Option<String>,
+    /// Print only the number of drafts in this window.
+    #[arg(long)]
+    count: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -343,6 +377,9 @@ pub fn run() -> Result<(), String> {
         Command::Task {
             command: TaskCommand::Delete { task_id },
         } => run_task_delete(&task_id),
+        Command::Draft {
+            command: DraftCommand::List(options),
+        } => run_draft_list(options),
     }
 }
 
@@ -1525,6 +1562,179 @@ fn run_task_list(options: TaskListArgs) -> Result<(), String> {
     }
 }
 
+fn run_draft_list(options: DraftListArgs) -> Result<(), String> {
+    if options.count && options.json {
+        return Err(
+            "--count cannot be combined with --json. Try 'backlog draft list --help' for options."
+                .into(),
+        );
+    }
+    if options.plain && options.json {
+        return Err("--json cannot be combined with --plain.".into());
+    }
+    let sort_field = options
+        .sort
+        .as_deref()
+        .unwrap_or("priority")
+        .to_ascii_lowercase();
+    if !["priority", "id", "ordinal"].contains(&sort_field.as_str()) {
+        return Err(format!(
+            "Invalid sort field: {}. Valid values are: priority, id, ordinal",
+            options.sort.as_deref().unwrap()
+        ));
+    }
+    let max_count = options
+        .max_count
+        .as_deref()
+        .map(parse_draft_max_count)
+        .transpose()?;
+    let skip = options
+        .skip
+        .as_deref()
+        .map(parse_draft_skip)
+        .transpose()?
+        .unwrap_or(0);
+    let context = project_context()?;
+    let mut drafts = DraftStore::new(&context.root, &context.backlog_directory)
+        .list_drafts()
+        .into_iter()
+        .map(|entry| entry.task)
+        .collect::<Vec<_>>();
+    drafts = sort_tasks(
+        &drafts,
+        Some(&sort_field),
+        context.config.priorities.as_deref().unwrap_or_default(),
+    );
+    let total = drafts.len();
+    let start = skip.min(total);
+    let end = max_count.map_or(total, |count| start.saturating_add(count).min(total));
+    let page = &drafts[start..end];
+    let next_skip = (end < total).then_some(end);
+    let cut = page.len() < total;
+
+    if options.json {
+        let draft_values = page
+            .iter()
+            .map(|task| {
+                let mut value = task_compact_json(task, false);
+                value["id"] = json!(normalize_task_id(&task.id, "draft"));
+                value
+            })
+            .collect::<Vec<_>>();
+        let mut result = json!({
+            "schemaVersion": 1,
+            "kind": "draft-list",
+            "drafts": draft_values,
+        });
+        if cut {
+            result["total"] = json!(total);
+            result["nextSkip"] = json!(next_skip);
+        }
+        return write_json(&result);
+    }
+    if options.count {
+        return write_stdout(&format!("{}\n", page.len()));
+    }
+    if page.is_empty() {
+        if total == 0 {
+            write_stdout("No drafts found.\n")?;
+        }
+    } else {
+        let mut output = String::from("Drafts:\n");
+        for draft in page {
+            let priority = draft
+                .priority
+                .as_deref()
+                .filter(|priority| !priority.is_empty())
+                .map(|priority| format!("[{}] ", priority.to_uppercase()))
+                .unwrap_or_default();
+            output.push_str(&format!(
+                "  {priority}{} - {}\n",
+                normalize_task_id(&draft.id, "draft"),
+                draft.title
+            ));
+        }
+        write_stdout(&output)?;
+    }
+    if cut {
+        let shown = page.len();
+        let range = if shown == 0 {
+            "0".into()
+        } else {
+            format!("{}-{}", start + 1, start + shown)
+        };
+        let footer = if let Some(next) = next_skip {
+            format!(
+                "Showing {range} of {total} items. Next: {}\n",
+                draft_next_command(next)
+            )
+        } else {
+            format!("Showing {range} of {total} items.\n")
+        };
+        write_stdout(&footer)?;
+    }
+    Ok(())
+}
+
+fn parse_draft_max_count(value: &str) -> Result<usize, String> {
+    let value = value.trim();
+    if value.is_empty()
+        || !value.as_bytes()[0].is_ascii_digit()
+        || value.as_bytes()[0] == b'0'
+        || !value.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err(
+            "--max-count must be a positive integer (1 or greater). Try 'backlog draft list --help' for options.".into(),
+        );
+    }
+    Ok(value.parse::<usize>().unwrap_or(usize::MAX))
+}
+
+fn parse_draft_skip(value: &str) -> Result<usize, String> {
+    let value = value.trim();
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err("--skip must be a non-negative integer (0 or greater). Try 'backlog draft list --help' for options.".into());
+    }
+    Ok(value.parse::<usize>().unwrap_or(usize::MAX))
+}
+
+fn draft_next_command(next_skip: usize) -> String {
+    let args = std::env::args().skip(1).collect::<Vec<_>>();
+    let mut kept = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--skip" {
+            index += 2;
+            continue;
+        }
+        if arg.starts_with("--skip=") {
+            index += 1;
+            continue;
+        }
+        kept.push(arg.clone());
+        index += 1;
+    }
+    kept.extend(["--skip".into(), next_skip.to_string()]);
+    std::iter::once("backlog".to_owned())
+        .chain(kept)
+        .map(|arg| quote_shell_argument(&arg))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn quote_shell_argument(argument: &str) -> String {
+    if !argument.is_empty()
+        && argument
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"@+:,./-".contains(&byte))
+    {
+        argument.to_owned()
+    } else {
+        format!("'{}'", argument.replace('\'', "'\\''"))
+    }
+}
+
 fn task_filter(
     options: &TaskListArgs,
     configured_statuses: &[String],
@@ -2198,6 +2408,12 @@ fn task_list_json(items: &[TaskListItem]) -> Value {
 }
 
 fn task_summary_json(task: &TaskRecord, archived: bool, is_ready: bool) -> Value {
+    let mut summary = task_compact_json(task, archived);
+    summary["isReady"] = json!(is_ready);
+    summary
+}
+
+fn task_compact_json(task: &TaskRecord, archived: bool) -> Value {
     let criteria = &task.acceptance_criteria_items;
     json!({
         "id": task.id,
@@ -2221,7 +2437,6 @@ fn task_summary_json(task: &TaskRecord, archived: bool, is_ready: bool) -> Value
         "createdAt": normalize_public_date(task.created_date.as_str()),
         "updatedAt": task.updated_date.as_deref().map(normalize_public_date),
         "dueDate": task.due_date.as_deref().map(normalize_public_date),
-        "isReady": is_ready,
     })
 }
 

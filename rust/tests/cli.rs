@@ -174,6 +174,103 @@ fn rust_task_list_empty_project_matches_the_live_typescript_cli() {
 }
 
 #[test]
+fn rust_draft_list_matches_typescript_for_plain_json_and_windows() {
+    let empty = Fixture::new();
+    std::fs::create_dir_all(empty.0.join("backlog/drafts")).unwrap();
+    for args in [
+        &["draft", "list", "--plain"][..],
+        &["draft", "list", "--json"][..],
+    ] {
+        let expected = typescript_cli(args, &empty.0);
+        let actual = rust_cli(args, &empty.0);
+        assert_eq!(actual.status.code(), expected.status.code(), "{args:?}");
+        assert_eq!(actual.stderr, expected.stderr, "{args:?}");
+        if args.contains(&"--json") {
+            assert_eq!(
+                serde_json::from_slice::<Value>(&actual.stdout).unwrap(),
+                serde_json::from_slice::<Value>(&expected.stdout).unwrap()
+            );
+        } else {
+            assert_eq!(actual.stdout, expected.stdout, "{args:?}");
+        }
+    }
+
+    let populated = fixture();
+    populated.file("backlog/drafts/draft-1-first.md", "---\nid: draft-1\ntitle: First draft\nstatus: Draft\npriority: high\ncreated_date: 2026-01-01\nordinal: 2\n---\n");
+    populated.file("backlog/drafts/draft-2-second.md", "---\nid: draft-2\ntitle: Second draft\nstatus: Draft\npriority: low\ncreated_date: 2026-01-02\nordinal: 1\n---\n");
+    populated.file("backlog/drafts/draft-03-third.md", "---\nid: draft-03\ntitle: Third draft\nstatus: Draft\npriority: medium\ncreated_date: 2026-01-03\nordinal: 3\n---\n");
+    let original_first =
+        std::fs::read(populated.0.join("backlog/drafts/draft-1-first.md")).unwrap();
+    let original_second =
+        std::fs::read(populated.0.join("backlog/drafts/draft-2-second.md")).unwrap();
+    let original_third =
+        std::fs::read(populated.0.join("backlog/drafts/draft-03-third.md")).unwrap();
+    for args in [
+        &["draft", "list", "--plain"][..],
+        &["draft", "list", "--json"][..],
+        &["draft", "list", "--sort", "id", "--max-count", "1"][..],
+        &["draft", "list", "--max-count", " 1 ", "--skip", " 0 "][..],
+        &["draft", "list", "--sort", "ordinal", "--max-count", "1"][..],
+        &["draft", "list", "--json", "--skip", "1"][..],
+        &[
+            "draft",
+            "list",
+            "--json",
+            "--max-count",
+            "999999999999999999999999999999",
+        ][..],
+        &["draft", "list", "--skip", "999999999999999999999999999999"][..],
+        &["draft", "list", "--count"][..],
+        &["draft", "list", "--count", "--json"][..],
+        &["draft", "list", "--sort", "unknown"][..],
+        &["draft", "list", "--max-count", "0"][..],
+        &["draft", "list", "--max-count", "-1"][..],
+        &["draft", "list", "--max-count", "+1"][..],
+        &["draft", "list", "--skip", "-1"][..],
+        &["draft", "list", "--plain", "--json"][..],
+    ] {
+        let expected = typescript_cli(args, &populated.0);
+        let actual = rust_cli(args, &populated.0);
+        assert_eq!(actual.status.code(), expected.status.code(), "{args:?}");
+        assert_eq!(actual.stderr, expected.stderr, "{args:?}");
+        if args.contains(&"--json") && expected.status.success() {
+            assert_eq!(
+                serde_json::from_slice::<Value>(&actual.stdout).unwrap(),
+                serde_json::from_slice::<Value>(&expected.stdout).unwrap(),
+                "{args:?}"
+            );
+        } else {
+            assert_eq!(actual.stdout, expected.stdout, "{args:?}");
+        }
+        assert_eq!(
+            std::fs::read(populated.0.join("backlog/drafts/draft-1-first.md")).unwrap(),
+            original_first
+        );
+        assert_eq!(
+            std::fs::read(populated.0.join("backlog/drafts/draft-2-second.md")).unwrap(),
+            original_second
+        );
+        assert_eq!(
+            std::fs::read(populated.0.join("backlog/drafts/draft-03-third.md")).unwrap(),
+            original_third
+        );
+    }
+    let help = rust_cli(&["draft", "list", "--help"], &populated.0);
+    assert!(help.status.success());
+    let help = String::from_utf8_lossy(&help.stdout);
+    for option in [
+        "--plain",
+        "--json",
+        "--sort",
+        "--max-count",
+        "--skip",
+        "--count",
+    ] {
+        assert!(help.contains(option), "missing {option} in draft list help");
+    }
+}
+
+#[test]
 fn rust_task_view_plain_and_json_match_the_live_typescript_cli() {
     let fixture = fixture();
     for args in [
