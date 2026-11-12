@@ -4,8 +4,10 @@ use crate::{
     config::{Config, parse_config},
     dependency_graph::{DependencyGraph, DependencyGraphNode},
     discovery::{find_project_root, resolve_backlog_directory},
-    identity::task_ids_equal,
+    identity::{canonical_task_id, task_ids_equal},
+    milestone_store::MilestoneStore,
     records::TaskRecord,
+    sections::Criterion,
     task_detail::{TaskDetail, build_task_detail},
     task_filtering::{LabelMatch, TaskFilter},
     task_list::{TaskListItem, with_readiness},
@@ -48,6 +50,83 @@ enum TaskCommand {
         #[command(flatten)]
         options: TaskViewArgs,
     },
+    /// Create a task in the local working copy.
+    Create(Box<TaskCreateArgs>),
+}
+
+#[derive(Debug, Args)]
+struct TaskCreateArgs {
+    /// Task title.
+    title: Option<String>,
+    /// Task description.
+    #[arg(short, long, visible_alias = "desc")]
+    description: Option<String>,
+    /// Initial task status.
+    #[arg(short, long)]
+    status: Option<String>,
+    /// Assign one or more @names; repeat or comma-separate values.
+    #[arg(short, long, value_delimiter = ',', action = ArgAction::Append)]
+    assignee: Vec<String>,
+    /// Task labels; repeat or comma-separate values.
+    #[arg(short, long, value_delimiter = ',', action = ArgAction::Append)]
+    labels: Vec<String>,
+    /// Configured task priority.
+    #[arg(long)]
+    priority: Option<String>,
+    /// Configured task type.
+    #[arg(long = "type")]
+    task_type: Option<String>,
+    /// Configured project.
+    #[arg(long)]
+    project: Option<String>,
+    /// Milestone ID or title.
+    #[arg(short, long)]
+    milestone: Option<String>,
+    /// Due date in YYYY-MM-DD format.
+    #[arg(long)]
+    due_date: Option<String>,
+    /// Acceptance criterion; repeat for multiple criteria.
+    #[arg(long = "ac", visible_alias = "acceptance-criteria", action = ArgAction::Append)]
+    acceptance_criteria: Vec<String>,
+    /// Definition of Done item; repeat for multiple items.
+    #[arg(long = "dod", action = ArgAction::Append)]
+    definition_of_done: Vec<String>,
+    /// Do not include configured Definition of Done defaults.
+    #[arg(long)]
+    no_dod_defaults: bool,
+    /// Implementation plan for already-started work.
+    #[arg(long)]
+    plan: Option<String>,
+    /// Implementation notes.
+    #[arg(long)]
+    notes: Option<String>,
+    /// Final summary for completed work.
+    #[arg(long)]
+    final_summary: Option<String>,
+    /// Manual non-negative ordinal.
+    #[arg(long)]
+    ordinal: Option<f64>,
+    /// Existing parent task ID.
+    #[arg(short, long)]
+    parent: Option<String>,
+    /// Task dependency; repeat or comma-separate values.
+    #[arg(long = "depends-on", action = ArgAction::Append)]
+    depends_on: Vec<String>,
+    /// Alias for --depends-on.
+    #[arg(long = "dep", action = ArgAction::Append)]
+    dep: Vec<String>,
+    /// Reference URL or path; repeat for multiple references.
+    #[arg(long = "ref", action = ArgAction::Append)]
+    references: Vec<String>,
+    /// Documentation URL or path; repeat for multiple entries.
+    #[arg(long = "doc", action = ArgAction::Append)]
+    documentation: Vec<String>,
+    /// Modified file path; repeat for multiple paths.
+    #[arg(long = "modified-file", action = ArgAction::Append)]
+    modified_files: Vec<String>,
+    /// Print the full task detail after creation.
+    #[arg(long)]
+    plain: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -109,6 +188,7 @@ fn parse_positive_limit(value: &str) -> Result<usize, String> {
 
 struct ProjectContext {
     root: PathBuf,
+    backlog_directory: PathBuf,
     config: Config,
     store: TaskStore,
     prefix: String,
@@ -123,6 +203,9 @@ pub fn run() -> Result<(), String> {
         Command::Task {
             command: TaskCommand::View { task_id, options },
         } => run_task_view(&task_id, options),
+        Command::Task {
+            command: TaskCommand::Create(options),
+        } => run_task_create(*options),
     }
 }
 
@@ -143,9 +226,11 @@ fn project_context() -> Result<ProjectContext, String> {
         None => Config::default(),
     };
     let prefix = config.task_prefix.as_deref().unwrap_or("task").to_owned();
-    let store = TaskStore::new(&root, backlog_directory, &prefix);
+    let backlog_directory = PathBuf::from(backlog_directory);
+    let store = TaskStore::new(&root, &backlog_directory, &prefix);
     Ok(ProjectContext {
         root,
+        backlog_directory,
         config,
         store,
         prefix,
@@ -210,9 +295,345 @@ fn run_task_view(task_id: &str, options: TaskViewArgs) -> Result<(), String> {
                 &active,
                 &context.config,
                 &context.prefix,
+                true,
             )
         ))
     }
+}
+
+fn run_task_create(options: TaskCreateArgs) -> Result<(), String> {
+    let title = options.title.as_deref().unwrap_or_default().trim();
+    if title.is_empty() {
+        return Err("error: missing required argument 'title'".into());
+    }
+    let context = project_context()?;
+    if options
+        .ordinal
+        .is_some_and(|ordinal| !ordinal.is_finite() || ordinal < 0.0)
+    {
+        return Err(format!(
+            "Invalid ordinal: {}. Must be a non-negative number.",
+            options.ordinal.unwrap()
+        ));
+    }
+    let status = match options
+        .status
+        .as_deref()
+        .filter(|status| !status.trim().is_empty())
+    {
+        Some(requested) => Some(
+            resolve_config_value(requested, &context.config.statuses).ok_or_else(|| {
+                format!(
+                    "Invalid status: {requested}. Valid statuses are: {}",
+                    context.config.statuses.join(", ")
+                )
+            })?,
+        ),
+        None => context
+            .config
+            .default_status
+            .clone()
+            .or_else(|| Some("To Do".into())),
+    };
+    let default_priorities = ["High".into(), "Medium".into(), "Low".into()];
+    let priority_values = context
+        .config
+        .priorities
+        .as_deref()
+        .unwrap_or(&default_priorities);
+    let priority = options
+        .priority
+        .as_deref()
+        .map(|value| {
+            resolve_config_value(value, priority_values)
+                .ok_or_else(|| {
+                    format!(
+                        "Invalid priority: {value}. Valid values are: {}",
+                        priority_values.join(", ")
+                    )
+                })
+                .map(|priority| priority.to_lowercase())
+        })
+        .transpose()?;
+    let task_type = options
+        .task_type
+        .as_deref()
+        .map(|value| {
+            let default_types = [
+                "bug".into(),
+                "feature".into(),
+                "enhancement".into(),
+                "task".into(),
+                "chore".into(),
+                "docs".into(),
+                "spike".into(),
+            ];
+            let values = context.config.types.as_deref().unwrap_or(&default_types);
+            resolve_config_value(value, values).ok_or_else(|| {
+                format!(
+                    "Invalid type: {value}. Valid types are: {}",
+                    values.join(", ")
+                )
+            })
+        })
+        .transpose()?;
+    let project = options.project.as_deref().map(|value| {
+        let values = context.config.projects.as_deref().unwrap_or_default();
+        if values.is_empty() {
+            return Err("No projects are configured. Add a 'projects:' list to the project config file.".to_owned());
+        }
+        resolve_config_value(value, values).ok_or_else(|| {
+            format!("Invalid project: {value}. Valid projects are: {}", values.join(", "))
+        })
+    }).transpose()?;
+    let milestone = options
+        .milestone
+        .as_deref()
+        .map(|value| resolve_milestone_for_create(value, &context.root, &context.backlog_directory))
+        .transpose()?;
+
+    let acceptance_criteria_items = options
+        .acceptance_criteria
+        .iter()
+        .enumerate()
+        .map(|(index, text)| Criterion {
+            index: index + 1,
+            text: text.trim().to_owned(),
+            checked: false,
+        })
+        .filter(|criterion| !criterion.text.is_empty())
+        .collect::<Vec<_>>();
+    let mut definition_of_done_items = Vec::new();
+    if !options.no_dod_defaults {
+        definition_of_done_items.extend(
+            context
+                .config
+                .definition_of_done
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .cloned(),
+        );
+    }
+    definition_of_done_items.extend(options.definition_of_done);
+    let definition_of_done_items = definition_of_done_items
+        .iter()
+        .enumerate()
+        .map(|(index, text)| Criterion {
+            index: index + 1,
+            text: text.trim().to_owned(),
+            checked: false,
+        })
+        .filter(|criterion| !criterion.text.is_empty())
+        .collect::<Vec<_>>();
+    let mut dependencies = options.depends_on;
+    dependencies.extend(options.dep);
+    if dependencies
+        .iter()
+        .any(|value| is_blank_create_list_value(value))
+    {
+        return Err("Cannot use an empty value with --depends-on or --dep. Omit the flag to leave task dependencies unset.".into());
+    }
+    if options
+        .references
+        .iter()
+        .any(|value| is_blank_create_list_value(value))
+    {
+        return Err(
+            "Cannot use an empty value with --ref. Omit the flag to leave references unset.".into(),
+        );
+    }
+    if options
+        .documentation
+        .iter()
+        .any(|value| is_blank_create_list_value(value))
+    {
+        return Err(
+            "Cannot use an empty value with --doc. Omit the flag to leave documentation unset."
+                .into(),
+        );
+    }
+    let parent_task_id = options
+        .parent
+        .as_deref()
+        .map(|parent| {
+            context
+                .store
+                .load_task(parent)
+                .map_err(|error| error.to_string())?
+                .map(|entry| canonical_task_id(&entry.task.id, &context.prefix))
+                .ok_or_else(|| {
+                    let parent_id = canonical_task_id(parent, &context.prefix);
+                    format!("Parent task {parent_id} not found. Task lookups read only the local working copy; use 'backlog browser' to see tasks from other branches. Use an existing task ID with --parent; use --milestone to assign a task to a milestone.")
+                })
+        })
+        .transpose()?;
+
+    let task = TaskRecord {
+        id: String::new(),
+        title: title.to_owned(),
+        status: status.unwrap_or_else(|| "To Do".into()),
+        assignee: if options.assignee.is_empty() {
+            context.config.default_assignee.clone().unwrap_or_default()
+        } else {
+            normalized_create_values(options.assignee)
+        },
+        reporter: None,
+        created_date: crate::task_store::utc_timestamp(),
+        updated_date: None,
+        due_date: options.due_date,
+        labels: normalized_create_values(options.labels),
+        milestone,
+        dependencies: normalized_delimited_create_values(dependencies),
+        references: normalized_delimited_create_values(options.references),
+        documentation: normalized_delimited_create_values(options.documentation),
+        modified_files: normalized_delimited_create_values(options.modified_files),
+        raw_content: String::new(),
+        acceptance_criteria_items,
+        definition_of_done_items,
+        description: options.description.unwrap_or_default(),
+        implementation_plan: options.plan,
+        implementation_notes: options.notes,
+        comments: Vec::new(),
+        final_summary: options.final_summary,
+        parent_task_id,
+        subtasks: None,
+        priority,
+        task_type,
+        project,
+        ordinal: options.ordinal,
+        on_status_change: None,
+    };
+    let entry = context
+        .store
+        .create_task_with_default_ordinal(task, &context.config)
+        .map_err(|error| error.to_string())?;
+    if options.plain {
+        let active = context
+            .store
+            .list_tasks()
+            .into_iter()
+            .map(|entry| entry.task)
+            .collect::<Vec<_>>();
+        let archived = context
+            .store
+            .list_archived_tasks()
+            .into_iter()
+            .map(|entry| entry.task)
+            .collect::<Vec<_>>();
+        let detail = build_task_detail(
+            &entry.task,
+            &active,
+            &archived,
+            &context.config.statuses,
+            &[],
+            &context.prefix,
+        );
+        return write_stdout(&format!(
+            "{}\n",
+            format_task_detail(
+                &detail,
+                &entry.path,
+                false,
+                &active,
+                &context.config,
+                &context.prefix,
+                false,
+            )
+        ));
+    }
+    write_stdout(&format!(
+        "Created task {}\nFile: {}\n",
+        entry.task.id,
+        entry.path.display()
+    ))
+}
+
+fn normalized_create_values(values: Vec<String>) -> Vec<String> {
+    values
+        .into_iter()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .collect()
+}
+
+fn normalized_delimited_create_values(values: Vec<String>) -> Vec<String> {
+    normalized_create_values(
+        values
+            .into_iter()
+            .flat_map(|value| value.split(',').map(str::to_owned).collect::<Vec<_>>())
+            .collect(),
+    )
+}
+
+fn is_blank_create_list_value(value: &str) -> bool {
+    value.split(',').all(|item| item.trim().is_empty())
+}
+
+fn resolve_milestone_for_create(
+    input: &str,
+    root: &std::path::Path,
+    backlog_directory: &std::path::Path,
+) -> Result<String, String> {
+    let normalized = input.trim();
+    if normalized.is_empty() {
+        return Ok(normalized.to_owned());
+    }
+    let store = MilestoneStore::new(root, backlog_directory);
+    let active = store.list_active();
+    let archived = store.list_archived();
+    let id_like = normalized
+        .strip_prefix("m-")
+        .or_else(|| normalized.strip_prefix("M-"))
+        .unwrap_or(normalized);
+    let looks_like_id = id_like.bytes().all(|byte| byte.is_ascii_digit());
+    let all = active.iter().chain(archived.iter()).collect::<Vec<_>>();
+    if looks_like_id {
+        let requested_number = id_like.trim_start_matches('0');
+        let requested_number = if requested_number.is_empty() {
+            "0"
+        } else {
+            requested_number
+        };
+        if let Some(milestone) = all.iter().find(|milestone| {
+            let number = milestone
+                .id
+                .strip_prefix("m-")
+                .or_else(|| milestone.id.strip_prefix("M-"));
+            number.is_some_and(|number| {
+                let number = number.trim_start_matches('0');
+                let number = if number.is_empty() { "0" } else { number };
+                number == requested_number
+            })
+        }) {
+            return Ok(milestone.id.clone());
+        }
+    }
+    let active_matches = active
+        .iter()
+        .filter(|milestone| milestone.title.trim().eq_ignore_ascii_case(normalized))
+        .collect::<Vec<_>>();
+    if active_matches.len() == 1 {
+        return Ok(active_matches[0].id.clone());
+    }
+    if active_matches.len() > 1 {
+        return Ok(normalized.to_owned());
+    }
+    let archived_matches = archived
+        .iter()
+        .filter(|milestone| milestone.title.trim().eq_ignore_ascii_case(normalized))
+        .collect::<Vec<_>>();
+    if archived_matches.len() == 1 {
+        return Ok(archived_matches[0].id.clone());
+    }
+    Ok(normalized.to_owned())
+}
+
+fn resolve_config_value(value: &str, configured: &[String]) -> Option<String> {
+    configured
+        .iter()
+        .find(|candidate| candidate.eq_ignore_ascii_case(value.trim()))
+        .cloned()
 }
 
 fn run_task_list(options: TaskListArgs) -> Result<(), String> {
@@ -367,6 +788,7 @@ fn format_task_detail(
     active_tasks: &[TaskRecord],
     config: &Config,
     prefix: &str,
+    show_parent_title: bool,
 ) -> String {
     let task = &detail.task;
     let mut lines = vec![format!("File: {}", path.display()), String::new()];
@@ -440,10 +862,14 @@ fn format_task_detail(
         lines.push(format!("Milestone: {milestone}"));
     }
     if let Some(parent_id) = task.parent_task_id.as_deref() {
-        let parent_title = active_tasks
-            .iter()
-            .find(|candidate| task_ids_equal(parent_id, &candidate.id, prefix))
-            .map(|candidate| format!("{} - {}", parent_id, candidate.title))
+        let parent_title = show_parent_title
+            .then(|| {
+                active_tasks
+                    .iter()
+                    .find(|candidate| task_ids_equal(parent_id, &candidate.id, prefix))
+                    .map(|candidate| format!("{} - {}", parent_id, candidate.title))
+            })
+            .flatten()
             .unwrap_or_else(|| parent_id.to_owned());
         lines.push(format!("Parent: {parent_title}"));
     }

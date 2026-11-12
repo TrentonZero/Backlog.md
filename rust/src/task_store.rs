@@ -209,8 +209,26 @@ impl TaskStore {
     /// Allocate an ID and create a task while holding the shared create lock.
     pub fn create_task(
         &self,
+        task: TaskRecord,
+        config: &Config,
+    ) -> Result<TaskFileEntry, TaskStoreError> {
+        self.create_task_inner(task, config, false)
+    }
+
+    /// Create a task with the CLI's default ordinal selected under the shared create lock.
+    pub fn create_task_with_default_ordinal(
+        &self,
+        task: TaskRecord,
+        config: &Config,
+    ) -> Result<TaskFileEntry, TaskStoreError> {
+        self.create_task_inner(task, config, true)
+    }
+
+    fn create_task_inner(
+        &self,
         mut task: TaskRecord,
         config: &Config,
+        assign_default_ordinal: bool,
     ) -> Result<TaskFileEntry, TaskStoreError> {
         let lock = self
             .storage
@@ -224,6 +242,19 @@ impl TaskStore {
                     TaskStoreError::Storage(error.to_string())
                 }
             })?;
+        if assign_default_ordinal && task.ordinal.is_none() {
+            let tasks = self.list_tasks();
+            let ordinals = tasks
+                .iter()
+                .filter_map(|entry| entry.task.ordinal)
+                .filter(|value| value.is_finite())
+                .collect::<Vec<_>>();
+            task.ordinal = if ordinals.is_empty() {
+                (tasks.is_empty()).then_some(1000.0)
+            } else {
+                Some(ordinals.into_iter().fold(f64::NEG_INFINITY, f64::max) + 1000.0)
+            };
+        }
         let existing_ids = self.occupied_task_ids(config);
         let id_refs: Vec<&str> = existing_ids.iter().map(String::as_str).collect();
         let zero_padding = config

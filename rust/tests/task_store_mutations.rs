@@ -790,6 +790,36 @@ fn concurrent_creates_allocate_distinct_task_ids() {
 }
 
 #[test]
+fn concurrent_cli_creates_assign_distinct_default_ordinals_inside_the_create_lock() {
+    let fixture = Fixture::new();
+    let store = TaskStore::new(&fixture.0, "backlog", "task");
+    let config = Config::default();
+    let barrier = Arc::new(Barrier::new(3));
+    let handles: Vec<_> = (0..2)
+        .map(|_| {
+            let store = store.clone();
+            let barrier = Arc::clone(&barrier);
+            let config = config.clone();
+            thread::spawn(move || {
+                barrier.wait();
+                store
+                    .create_task_with_default_ordinal(initial_task(), &config)
+                    .unwrap()
+                    .task
+            })
+        })
+        .collect();
+    barrier.wait();
+    let mut tasks: Vec<_> = handles
+        .into_iter()
+        .map(|handle| handle.join().unwrap())
+        .collect();
+    tasks.sort_by(|left, right| left.id.cmp(&right.id));
+    assert_eq!(tasks[0].ordinal, Some(1000.0));
+    assert_eq!(tasks[1].ordinal, Some(2000.0));
+}
+
+#[test]
 fn task_creation_reserves_uncommitted_linked_worktree_filenames() {
     let fixture = Fixture::new();
     let typescript_root = fixture.0.join("typescript");

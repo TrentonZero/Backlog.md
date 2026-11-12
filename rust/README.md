@@ -2,7 +2,9 @@
 
 This Cargo package contains the staged [Rust executable migration](../docs/superpowers/specs/2026-11-07-rust-migration-design.md).
 The `backlog` binary currently provides root help/version plus noninteractive
-`task list` and `task view` commands in plain or JSON mode. The shipped launcher,
+`task create`, `task list`, and `task view` commands. List and view support plain
+or JSON output; task creation supports confirmation output or full plain detail.
+The shipped launcher,
 interactive TUI, browser server and MCP adapter still use TypeScript; installation
 cutover has not happened.
 
@@ -11,6 +13,7 @@ Run the Rust task list from this repository with:
 ```sh
 cargo run --manifest-path rust/Cargo.toml -- task list --plain
 cargo run --manifest-path rust/Cargo.toml -- task view TASK-1 --json
+cargo run --manifest-path rust/Cargo.toml -- task create "Add tests" --parent TASK-1
 ```
 
 Use Rust 1.98 or later:
