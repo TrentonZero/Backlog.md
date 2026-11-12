@@ -3119,3 +3119,43 @@ fn rust_document_list_matches_typescript_order_windows_and_errors() {
     assert_eq!(actual.stdout, expected.stdout);
     assert_eq!(actual.stderr, expected.stderr);
 }
+
+#[test]
+fn rust_document_view_matches_typescript_ids_archives_and_errors() {
+    let project = fixture();
+    project.file(
+        "backlog/docs/doc-7 - Active Guide.md",
+        "---\nid: DOC-7\ntitle: Active Guide\ntype: guide\ncustom: keep\n---\n\nStored active markdown.\n",
+    );
+    project.file(
+        "backlog/archive/docs/doc-8 - Archived Guide.md",
+        "---\nid: doc-8\ntitle: Archived Guide\ntype: guide\n---\n\nStored archived markdown.\n",
+    );
+    project.file(
+        "backlog/docs/doc-9 - Conflict.md",
+        "---\nid: doc-9\ntitle: Active conflict\n---\nActive claimant.\n",
+    );
+    project.file(
+        "backlog/archive/docs/doc-9 - Conflict.md",
+        "---\nid: DOC-009\ntitle: Archived conflict\n---\nArchived claimant.\n",
+    );
+
+    for args in [
+        &["doc", "view", "7", "--plain"][..],
+        &["doc", "view", "DOC-007"][..],
+        &["doc", "view", "8", "--plain"][..],
+        &["doc", "view", "doc-008"][..],
+        &["doc", "view", "doc-999", "--plain"][..],
+        &["doc", "view", "9", "--plain"][..],
+    ] {
+        let expected = typescript_cli(args, &project.0);
+        let actual = rust_cli(args, &project.0);
+        assert_eq!(
+            actual.status.code(),
+            expected.status.code(),
+            "args: {args:?}"
+        );
+        assert_eq!(actual.stdout, expected.stdout, "args: {args:?}");
+        assert_eq!(actual.stderr, expected.stderr, "args: {args:?}");
+    }
+}

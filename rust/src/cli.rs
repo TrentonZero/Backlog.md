@@ -70,6 +70,19 @@ enum Command {
 enum DocCommand {
     /// List documents in the configured docs directory.
     List(DocListArgs),
+    /// Display a document's Markdown content.
+    View {
+        document_id: String,
+        #[command(flatten)]
+        options: DocumentViewArgs,
+    },
+}
+
+#[derive(Debug, Args)]
+struct DocumentViewArgs {
+    /// Use human-readable text output.
+    #[arg(long)]
+    plain: bool,
 }
 
 #[derive(Debug, Args)]
@@ -607,6 +620,13 @@ pub fn run() -> Result<(), String> {
         Command::Doc {
             command: DocCommand::List(options),
         } => run_document_list(options),
+        Command::Doc {
+            command:
+                DocCommand::View {
+                    document_id,
+                    options,
+                },
+        } => run_document_view(&document_id, options),
     }
 }
 
@@ -2367,6 +2387,26 @@ fn run_document_list(options: DocListArgs) -> Result<(), String> {
         ))?;
     }
     Ok(())
+}
+
+fn run_document_view(document_id: &str, options: DocumentViewArgs) -> Result<(), String> {
+    const ARCHIVED_DOCUMENT_NOTICE: &str = "This document is archived and read-only.";
+    let _ = options.plain;
+    let context = project_context()?;
+    let store = DocumentStore::new(&context.root, &context.backlog_directory, &context.prefix);
+    let Some(entry) = store
+        .load_document_for_view(document_id)
+        .map_err(|error| error.to_string())?
+    else {
+        return Err(format!("Document {document_id} not found."));
+    };
+    let content = fs::read_to_string(&entry.path)
+        .map_err(|_| format!("Document {document_id} not found."))?;
+    if entry.archived {
+        write_stdout(&format!("{ARCHIVED_DOCUMENT_NOTICE}\n\n{content}\n"))
+    } else {
+        write_stdout(&format!("{content}\n"))
+    }
 }
 
 fn run_draft_view(task_id: &str, options: DraftViewArgs) -> Result<(), String> {

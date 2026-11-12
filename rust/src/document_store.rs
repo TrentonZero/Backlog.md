@@ -174,6 +174,14 @@ impl DocumentStore {
             .ok_or_else(|| DocumentStoreError::NotFound(id.into()))
     }
 
+    /// Resolve one document for viewing across the docs and archive folders.
+    pub fn load_document_for_view(
+        &self,
+        id: &str,
+    ) -> Result<Option<DocumentFileEntry>, DocumentStoreError> {
+        self.resolve_document(id)
+    }
+
     /// Create a document using the shared create lock and the first free DOC identity.
     pub fn create_document(
         &self,
