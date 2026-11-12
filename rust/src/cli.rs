@@ -12,9 +12,11 @@ use crate::{
     records::TaskRecord,
     sections::{ChecklistKind, Comment, Criterion, SectionKey},
     task_detail::{TaskDetail, build_task_detail},
-    task_filtering::{LabelMatch, TaskFilter},
+    task_filtering::{LabelMatch, TaskFilter, TaskFilterMatcher},
     task_list::{TaskListItem, with_readiness},
-    task_search::TaskSearchIndex,
+    task_search::{
+        TaskSearchFields, TaskSearchIndex, build_task_search_fields, search_fields_score,
+    },
     task_sorting::{TaskSection, section_tasks, sort_tasks},
     task_store::TaskStore,
 };
@@ -77,6 +79,8 @@ enum Command {
         #[command(subcommand)]
         command: Option<MilestoneCommand>,
     },
+    /// Search tasks, documents, and decisions.
+    Search(SearchArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -166,6 +170,72 @@ struct MilestoneRemoveArgs {
     /// Active target milestone when task handling is reassign.
     #[arg(long)]
     reassign_to: Option<String>,
+}
+
+#[derive(Debug, Args)]
+struct SearchArgs {
+    /// Fuzzy search text.
+    #[arg(allow_hyphen_values = true)]
+    query: Option<String>,
+    /// Limit results to task, document, or decision; repeat the option to select multiple types.
+    #[arg(long = "type", action = ArgAction::Append)]
+    result_types: Option<Vec<String>>,
+    /// Filter task results by configured type; repeat or comma-separate values.
+    #[arg(long, value_delimiter = ',', action = ArgAction::Append)]
+    task_type: Option<Vec<String>>,
+    /// Filter task results by status; repeat or comma-separate values.
+    #[arg(long, value_delimiter = ',', action = ArgAction::Append)]
+    status: Option<Vec<String>>,
+    /// Exclude task results by status; repeat or comma-separate values.
+    #[arg(long, value_delimiter = ',', action = ArgAction::Append)]
+    exclude_status: Option<Vec<String>>,
+    /// Filter task results by configured priority.
+    #[arg(long)]
+    priority: Option<String>,
+    /// Filter task results by configured project; repeat or comma-separate values.
+    #[arg(long, value_delimiter = ',', action = ArgAction::Append)]
+    project: Option<Vec<String>>,
+    /// Filter task results by modified-file path substring; repeat or comma-separate values.
+    #[arg(long = "modified-file", value_delimiter = ',', action = ArgAction::Append)]
+    modified_file: Option<Vec<String>>,
+    /// Maximum total search results before applying the output window.
+    #[arg(long, allow_hyphen_values = true)]
+    limit: Option<String>,
+    #[command(flatten)]
+    window: ListWindowArgs,
+    /// Use human-readable text output.
+    #[arg(long)]
+    plain: bool,
+    /// Use versioned JSON output.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Clone, Copy)]
+enum SearchResultRef<'a> {
+    Task(&'a TaskRecord),
+    Document(&'a crate::document_store::DocumentFileEntry),
+    Decision(&'a crate::decision_store::DecisionFileEntry),
+}
+
+impl SearchResultRef<'_> {
+    fn kind(self) -> &'static str {
+        match self {
+            Self::Task(_) => "task",
+            Self::Document(_) => "document",
+            Self::Decision(_) => "decision",
+        }
+    }
+}
+
+struct SearchIndexedResult<'a> {
+    result: SearchResultRef<'a>,
+    fields: TaskSearchFields,
+}
+
+struct RankedSearchResult<'a> {
+    result: SearchResultRef<'a>,
+    score: Option<f64>,
 }
 
 #[derive(Debug, Args)]
@@ -718,6 +788,7 @@ fn parse_positive_limit(value: &str) -> Result<usize, String> {
 struct ProjectContext {
     root: PathBuf,
     backlog_directory: PathBuf,
+    config_path: Option<PathBuf>,
     config: Config,
     store: TaskStore,
     prefix: String,
@@ -907,6 +978,7 @@ pub fn run() -> Result<(), String> {
                 Err(String::from_utf8_lossy(&help).trim_end().to_owned())
             }
         },
+        Command::Search(options) => run_search(options),
     }
 }
 
@@ -933,6 +1005,7 @@ fn project_context() -> Result<ProjectContext, String> {
     let backlog_directory = resolution.backlog_directory.ok_or_else(|| {
         "No Backlog.md project found. Run `backlog init` to initialize.".to_owned()
     })?;
+    let config_path = resolution.config_path.clone();
     let config = match resolution.config_path {
         Some(path) => {
             let source = fs::read_to_string(&path).map_err(|error| error.to_string())?;
@@ -946,6 +1019,7 @@ fn project_context() -> Result<ProjectContext, String> {
     Ok(ProjectContext {
         root,
         backlog_directory,
+        config_path,
         config,
         store,
         prefix,
@@ -3988,6 +4062,479 @@ fn run_milestone_remove(options: MilestoneRemoveArgs) -> Result<(), String> {
     write_stdout(&format!("{}\n", result.summary()))
 }
 
+fn run_search(options: SearchArgs) -> Result<(), String> {
+    if options.json && options.plain {
+        return Err("--json cannot be combined with --plain.".into());
+    }
+    if options.window.count && options.json {
+        return Err(
+            "--count cannot be combined with --json. Try 'backlog search --help' for options."
+                .into(),
+        );
+    }
+    let window = parse_list_window(&options.window, "backlog search")?;
+    let limit = options
+        .limit
+        .as_deref()
+        .map(|value| {
+            let value = value.trim();
+            if value.is_empty()
+                || !value.bytes().all(|byte| byte.is_ascii_digit())
+                || value.as_bytes()[0] == b'0'
+            {
+                return Err(String::from(
+                    "--limit must be a positive integer (1 or greater). Try 'backlog search --help' for options.",
+                ));
+            }
+            Ok(value.parse::<usize>().unwrap_or(usize::MAX))
+        })
+        .transpose()?;
+
+    let context = project_context()?;
+    let task_types = clean_search_values(options.task_type.unwrap_or_default());
+    let projects = clean_search_values(options.project.unwrap_or_default());
+    let modified_files = clean_search_values(options.modified_file.unwrap_or_default());
+    let raw_types = options.result_types;
+    let mut allowed_types = if let Some(raw_types) = raw_types.as_ref() {
+        let mut types = Vec::new();
+        for value in raw_types.iter().map(|value| value.trim().to_lowercase()) {
+            if ["task", "document", "decision"].contains(&value.as_str()) {
+                if !types.contains(&value) {
+                    types.push(value);
+                }
+            } else if !value.is_empty() {
+                write_stderr(&format!(
+                    "Ignoring unsupported type '{value}'. Supported: task, document, decision\n"
+                ))?;
+            }
+        }
+        types
+    } else if !task_types.is_empty() || !projects.is_empty() || !modified_files.is_empty() {
+        vec!["task".to_owned()]
+    } else {
+        vec![
+            "task".to_owned(),
+            "document".to_owned(),
+            "decision".to_owned(),
+        ]
+    };
+    if allowed_types.is_empty() {
+        allowed_types.extend([
+            "task".to_owned(),
+            "document".to_owned(),
+            "decision".to_owned(),
+        ]);
+    }
+    if !task_types.is_empty()
+        && raw_types.is_some()
+        && !allowed_types.iter().any(|kind| kind == "task")
+    {
+        return Err("--task-type filters task results. Include --type task or omit --type.".into());
+    }
+    if !projects.is_empty()
+        && raw_types.is_some()
+        && !allowed_types.iter().any(|kind| kind == "task")
+    {
+        return Err("--project filters task results. Include --type task or omit --type.".into());
+    }
+
+    let default_types = [
+        "bug".into(),
+        "feature".into(),
+        "enhancement".into(),
+        "task".into(),
+        "chore".into(),
+        "docs".into(),
+        "spike".into(),
+    ];
+    let task_types = canonical_search_config_values(
+        &task_types,
+        context.config.types.as_deref().unwrap_or(&default_types),
+        "task-type",
+        "types",
+    )?;
+    let projects = if projects.is_empty() {
+        Vec::new()
+    } else {
+        let configured_projects = context.config.projects.as_deref().unwrap_or_default();
+        if configured_projects.is_empty() {
+            let config_path = context
+                .config_path
+                .as_deref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| {
+                    context
+                        .root
+                        .join("backlog.config.yml")
+                        .display()
+                        .to_string()
+                });
+            return Err(format!(
+                "No projects are configured. Add a 'projects:' list to {config_path}."
+            ));
+        }
+        canonical_search_config_values(&projects, configured_projects, "project", "projects")?
+    };
+    let priorities = context
+        .config
+        .priorities
+        .clone()
+        .unwrap_or_else(|| vec!["High".into(), "Medium".into(), "Low".into()]);
+    let priority = options
+        .priority
+        .as_deref()
+        .map(|value| {
+            resolve_config_value(value, &priorities)
+                .map(|priority| priority.to_lowercase())
+                .ok_or_else(|| {
+                    format!(
+                        "Invalid priority: {value}. Valid values are: {}",
+                        priorities.join(", ")
+                    )
+                })
+        })
+        .transpose()?;
+    let excluded_statuses = canonical_statuses(
+        &clean_search_values(options.exclude_status.unwrap_or_default()),
+        &context.config.statuses,
+        "exclude-status",
+    )?;
+    let filter = TaskFilter {
+        statuses: clean_search_values(options.status.unwrap_or_default()),
+        exclude_statuses: excluded_statuses,
+        types: task_types,
+        projects,
+        priorities: priority.into_iter().collect(),
+        modified_files,
+        ..TaskFilter::default()
+    };
+
+    let task_entries = context.store.list_tasks();
+    let tasks = task_entries
+        .iter()
+        .map(|entry| &entry.task)
+        .collect::<Vec<_>>();
+    let task_corpus = tasks.iter().map(|task| (*task).clone()).collect::<Vec<_>>();
+    let archived_tasks = context
+        .store
+        .list_archived_tasks()
+        .into_iter()
+        .map(|entry| entry.task)
+        .collect::<Vec<_>>();
+    let documents = DocumentStore::new(&context.root, &context.backlog_directory, &context.prefix)
+        .list_documents();
+    let decisions = DecisionStore::new(&context.root, &context.backlog_directory, &context.prefix)
+        .list_decisions();
+    let milestone_store = MilestoneStore::new(&context.root, &context.backlog_directory);
+    let all_milestones = milestone_store
+        .list_active()
+        .into_iter()
+        .chain(milestone_store.list_archived())
+        .collect::<Vec<_>>();
+    let matcher = TaskFilterMatcher::new(&filter, &context.prefix, &all_milestones, &task_corpus);
+
+    let mut corpus = Vec::new();
+    for task in &tasks {
+        corpus.push(SearchIndexedResult {
+            result: SearchResultRef::Task(task),
+            fields: build_task_search_fields(task),
+        });
+    }
+    for document in &documents {
+        corpus.push(SearchIndexedResult {
+            result: SearchResultRef::Document(document),
+            fields: content_search_fields(
+                &document.document.id,
+                &document.document.title,
+                &document.document.raw_content,
+            ),
+        });
+    }
+    for decision in &decisions {
+        corpus.push(SearchIndexedResult {
+            result: SearchResultRef::Decision(decision),
+            fields: content_search_fields(
+                &decision.decision.id,
+                &decision.decision.title,
+                &decision.decision.raw_content,
+            ),
+        });
+    }
+
+    let query = options.query.as_deref().unwrap_or_default().trim();
+    let mut ranked = corpus
+        .iter()
+        .filter_map(|entry| {
+            let kind = entry.result.kind();
+            if !allowed_types.iter().any(|allowed| allowed == kind) {
+                return None;
+            }
+            if let SearchResultRef::Task(task) = entry.result
+                && !matcher.matches(task)
+            {
+                return None;
+            }
+            let score = if query.is_empty() {
+                None
+            } else {
+                search_fields_score(query, &entry.fields)
+            };
+            (query.is_empty() || score.is_some()).then_some(RankedSearchResult {
+                result: entry.result,
+                score,
+            })
+        })
+        .collect::<Vec<_>>();
+    if !query.is_empty() {
+        ranked.sort_by(|left, right| {
+            left.score
+                .unwrap_or_default()
+                .total_cmp(&right.score.unwrap_or_default())
+        });
+    }
+    if let Some(limit) = limit {
+        ranked.truncate(limit);
+    }
+
+    let plain = ["task", "document", "decision"]
+        .into_iter()
+        .flat_map(|kind| {
+            ranked
+                .iter()
+                .filter(move |result| result.result.kind() == kind)
+        })
+        .collect::<Vec<_>>();
+    let printed = if options.json {
+        ranked.iter().collect::<Vec<_>>()
+    } else {
+        plain
+    };
+    let total = printed.len();
+    let start = window.skip.min(total);
+    let end = window
+        .max_count
+        .map_or(total, |count| start.saturating_add(count).min(total));
+    let page = &printed[start..end];
+    let next_skip = (end < total).then_some(end);
+    let cut = page.len() < total;
+
+    if window.count {
+        return write_stdout(&format!("{}\n", page.len()));
+    }
+    if options.json {
+        return write_pretty_json(&search_results_json(
+            page,
+            &context,
+            &task_corpus,
+            &archived_tasks,
+            cut.then_some((total, next_skip)),
+        ));
+    }
+    write_search_results(page, &context.prefix)?;
+    if cut {
+        write_stdout(&format_list_window_footer(
+            window.skip,
+            page.len(),
+            total,
+            next_skip,
+            "\n",
+        ))?;
+    }
+    Ok(())
+}
+
+fn clean_search_values(values: Vec<String>) -> Vec<String> {
+    values
+        .into_iter()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .collect()
+}
+
+fn canonical_search_config_values(
+    values: &[String],
+    configured: &[String],
+    option: &str,
+    valid_name: &str,
+) -> Result<Vec<String>, String> {
+    let mut canonical = Vec::new();
+    let mut invalid = Vec::new();
+    for value in values {
+        if let Some(resolved) = resolve_config_value(value, configured) {
+            if !canonical
+                .iter()
+                .any(|existing: &String| existing.eq_ignore_ascii_case(&resolved))
+            {
+                canonical.push(resolved);
+            }
+        } else {
+            invalid.push(value.clone());
+        }
+    }
+    if invalid.is_empty() {
+        return Ok(canonical);
+    }
+    Err(format!(
+        "Invalid {option}: {}. Valid {valid_name} are: {}",
+        invalid.join(", "),
+        configured.join(", ")
+    ))
+}
+
+fn content_search_fields(id: &str, title: &str, body_text: &str) -> TaskSearchFields {
+    TaskSearchFields {
+        title: title.to_owned(),
+        body_text: body_text.to_owned(),
+        id: id.to_owned(),
+        id_variants: Vec::new(),
+        dependency_ids: Vec::new(),
+        modified_files: Vec::new(),
+    }
+}
+
+fn search_score_text(score: Option<f64>) -> String {
+    score
+        .map(|score| format!(" [score {:.3}]", 1.0 - score))
+        .unwrap_or_default()
+}
+
+fn write_search_results(results: &[&RankedSearchResult<'_>], prefix: &str) -> Result<(), String> {
+    let mut sections = Vec::new();
+    for kind in ["task", "document", "decision"] {
+        let rows = results
+            .iter()
+            .filter(|result| result.result.kind() == kind)
+            .map(|result| match result.result {
+                SearchResultRef::Task(task) => {
+                    let status = if task.status.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" ({})", task.status)
+                    };
+                    let priority = task
+                        .priority
+                        .as_deref()
+                        .filter(|priority| !priority.is_empty())
+                        .map(|priority| format!(" [{}]", priority.to_uppercase()))
+                        .unwrap_or_default();
+                    format!(
+                        "  {} - {}{}{}{}",
+                        normalize_task_id(&task.id, prefix),
+                        task.title,
+                        status,
+                        priority,
+                        search_score_text(result.score)
+                    )
+                }
+                SearchResultRef::Document(document) => format!(
+                    "  {} - {}{}",
+                    document.document.id,
+                    document.document.title,
+                    search_score_text(result.score)
+                ),
+                SearchResultRef::Decision(decision) => format!(
+                    "  {} - {}{}",
+                    decision.decision.id,
+                    decision.decision.title,
+                    search_score_text(result.score)
+                ),
+            })
+            .collect::<Vec<_>>();
+        if !rows.is_empty() {
+            let heading = match kind {
+                "task" => "Tasks:",
+                "document" => "Documents:",
+                _ => "Decisions:",
+            };
+            sections.push(
+                std::iter::once(heading.to_owned())
+                    .chain(rows)
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            );
+        }
+    }
+    if sections.is_empty() {
+        write_stdout("No results found.\n")
+    } else {
+        write_stdout(&format!("{}\n", sections.join("\n\n")))
+    }
+}
+
+fn search_results_json(
+    results: &[&RankedSearchResult<'_>],
+    context: &ProjectContext,
+    task_corpus: &[TaskRecord],
+    archived_tasks: &[TaskRecord],
+    cut: Option<(usize, Option<usize>)>,
+) -> Value {
+    let result_tasks = results
+        .iter()
+        .filter_map(|result| match result.result {
+            SearchResultRef::Task(task) => Some(task.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let readiness = with_readiness(
+        &result_tasks,
+        task_corpus,
+        archived_tasks,
+        &context.config.statuses,
+        &[],
+        &context.prefix,
+    );
+    let mut next_task = readiness.iter();
+    let mut json_results = Vec::new();
+    for result in results {
+        let entry = match result.result {
+            SearchResultRef::Task(task) => {
+                let is_ready = next_task.next().is_some_and(|item| item.is_ready);
+                json!({"type": "task", "data": task_summary_json(task, false, is_ready)})
+            }
+            SearchResultRef::Document(document) => {
+                let relative = document
+                    .path
+                    .strip_prefix(&context.root)
+                    .map(|path| path.to_string_lossy().replace('\\', "/"))
+                    .unwrap_or_else(|_| document.path.to_string_lossy().replace('\\', "/"));
+                json!({
+                    "type": "document",
+                    "data": {
+                        "id": document.document.id,
+                        "title": document.document.title,
+                        "type": document.document.document_type,
+                        "path": relative,
+                        "tags": document.document.tags.clone().unwrap_or_default(),
+                        "createdAt": normalize_public_date(&document.document.created_date),
+                        "updatedAt": document.document.updated_date.as_deref().map(normalize_public_date),
+                    }
+                })
+            }
+            SearchResultRef::Decision(decision) => json!({
+                "type": "decision",
+                "data": {
+                    "id": decision.decision.id,
+                    "title": decision.decision.title,
+                    "status": decision.decision.status,
+                    "date": normalize_public_date(&decision.decision.date),
+                    "supersededBy": decision.decision.superseded_by,
+                }
+            }),
+        };
+        json_results.push(entry);
+    }
+    let mut output = json!({
+        "schemaVersion": 1,
+        "kind": "search",
+        "results": json_results,
+    });
+    if let Some((total, next_skip)) = cut {
+        output["total"] = json!(total);
+        output["nextSkip"] = json!(next_skip);
+    }
+    output
+}
+
 fn milestone_task_match_keys(
     name: &str,
     milestone: &crate::records::MilestoneRecord,
@@ -4387,7 +4934,11 @@ fn list_next_command(next_skip: usize) -> String {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     let mut kept = Vec::new();
     let mut index = 0;
-    while index < args.len() {
+    let separator = args
+        .iter()
+        .position(|arg| arg == "--")
+        .unwrap_or(args.len());
+    while index < separator {
         let arg = &args[index];
         if arg == "--skip" {
             index += 2;
@@ -4401,6 +4952,7 @@ fn list_next_command(next_skip: usize) -> String {
         index += 1;
     }
     kept.extend(["--skip".into(), next_skip.to_string()]);
+    kept.extend(args[separator..].iter().cloned());
     std::iter::once("backlog".to_owned())
         .chain(kept)
         .map(|arg| quote_shell_argument(&arg))
@@ -5275,6 +5827,12 @@ fn normalize_public_date(value: &str) -> String {
 fn write_json(value: &Value) -> Result<(), String> {
     let mut stdout = io::stdout().lock();
     serde_json::to_writer(&mut stdout, value).map_err(|error| error.to_string())?;
+    stdout.write_all(b"\n").map_err(|error| error.to_string())
+}
+
+fn write_pretty_json(value: &Value) -> Result<(), String> {
+    let mut stdout = io::stdout().lock();
+    serde_json::to_writer_pretty(&mut stdout, value).map_err(|error| error.to_string())?;
     stdout.write_all(b"\n").map_err(|error| error.to_string())
 }
 

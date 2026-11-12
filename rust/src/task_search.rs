@@ -49,7 +49,7 @@ impl<'a> TaskSearchIndex<'a> {
             .iter()
             .enumerate()
             .filter_map(|(index, fields)| {
-                task_search_score(query, fields).map(|score| (score, index))
+                search_fields_score(query, fields).map(|score| (score, index))
             })
             .collect::<Vec<_>>();
         ranked.sort_by(|left, right| left.0.total_cmp(&right.0).then(left.1.cmp(&right.1)));
@@ -137,7 +137,9 @@ pub fn build_task_search_fields(task: &TaskRecord) -> TaskSearchFields {
     }
 }
 
-fn task_search_score(query: &str, fields: &TaskSearchFields) -> Option<f64> {
+/// Score one set of fields with the shared Fuse-compatible task search weights.
+/// Documents and decisions use this same projection with their unused task fields empty.
+pub fn search_fields_score(query: &str, fields: &TaskSearchFields) -> Option<f64> {
     let values = [
         (std::slice::from_ref(&fields.title), 0.35),
         (std::slice::from_ref(&fields.body_text), 0.3),

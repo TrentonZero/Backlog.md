@@ -233,6 +233,183 @@ fn rust_task_list_empty_project_matches_the_live_typescript_cli() {
     }
 }
 
+fn search_fixture() -> Fixture {
+    let fixture = Fixture::new();
+    fixture.file(
+		"backlog.config.yml",
+		"project_name: Search Fixture\ntask_prefix: task\nstatuses:\n  - To Do\n  - In Progress\n  - Done\ntypes:\n  - Bug\n  - Feature\nprojects:\n  - web\npriorities:\n  - High\n  - Low\n",
+	);
+    fixture.file(
+		"backlog/tasks/task-1-central.md",
+		"---\nid: task-1\ntitle: Central search integration --type\nstatus: To Do\ntype: Feature\npriority: high\nproject: web\nmodified_files:\n  - src/main.rs\nlabels:\n  - central\ncreated_date: 2026-01-01\n---\n\nImplements the central search module.\n",
+	);
+    fixture.file(
+		"backlog/tasks/task-2-follow-up.md",
+		"---\nid: task-2\ntitle: Search follow-up --type\nstatus: In Progress\ntype: Bug\npriority: low\ncreated_date: 2026-01-02\n---\n\nFollow-up work.\n",
+	);
+    fixture.file(
+		"backlog/docs/doc-1 - Search Architecture.md",
+		"---\nid: doc-1\ntitle: Search Architecture\ntype: guide\ncreated_date: 2026-01-03\ntags:\n  - search\n---\n\n# Search Architecture\nCentral search design.\n",
+	);
+    fixture.file(
+		"backlog/decisions/decision-1 - Adopt Central Search.md",
+		"---\nid: decision-1\ntitle: Adopt Central Search\ndate: 2026-01-04\nstatus: accepted\n---\n\n## Context\n\nDiscussed central search consolidation.\n\n## Decision\n\nAdopt the shared index.\n",
+	);
+    fixture
+}
+
+#[test]
+fn rust_search_next_command_keeps_literal_query_after_separator() {
+    let reference = search_fixture();
+    let candidate = search_fixture();
+    let args = ["search", "--plain", "--max-count", "1", "--", "--type"];
+    let expected = typescript_cli(&args, &reference.0);
+    let actual = rust_cli(&args, &candidate.0);
+    assert_eq!(actual.status.code(), expected.status.code());
+    assert_eq!(actual.stderr, expected.stderr);
+    assert_eq!(actual.stdout, expected.stdout);
+
+    let stdout = String::from_utf8(actual.stdout).unwrap();
+    let next = stdout
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("Showing ")
+                .and_then(|line| line.split_once(" Next: ").map(|(_, command)| command))
+        })
+        .expect("search output should include a next-page command");
+    let path =
+        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).collect::<Vec<_>>();
+    let binary_directory = PathBuf::from(env!("CARGO_BIN_EXE_backlog"))
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let mut paths = vec![binary_directory];
+    paths.extend(path);
+    let output = Command::new("sh")
+        .args(["-c", next])
+        .current_dir(&candidate.0)
+        .env("PATH", std::env::join_paths(paths).unwrap())
+        .output()
+        .unwrap();
+    let expected_page = typescript_cli(
+        &[
+            "search",
+            "--plain",
+            "--max-count",
+            "1",
+            "--skip",
+            "1",
+            "--",
+            "--type",
+        ],
+        &reference.0,
+    );
+    assert_eq!(output.status.code(), expected_page.status.code());
+    assert_eq!(output.stderr, expected_page.stderr);
+    assert_eq!(output.stdout, expected_page.stdout);
+}
+
+#[test]
+fn rust_cross_entity_search_matches_typescript_output_filters_and_windows() {
+    let reference = search_fixture();
+    let candidate = search_fixture();
+    for args in [
+        vec!["search", "central", "--plain"],
+        vec!["search", "central", "--plain", "--type", "invalid"],
+        vec![
+            "search", "central", "--plain", "--type", "task", "--type", "document",
+        ],
+        vec![
+            "search", "central", "--plain", "--type", "task", "--type", "decision",
+        ],
+        vec![
+            "search", "central", "--plain", "--type", "task", "--status", "to do",
+        ],
+        vec![
+            "search",
+            "central",
+            "--plain",
+            "--type",
+            "task",
+            "--exclude-status",
+            "Done",
+        ],
+        vec!["search", "central", "--plain", "--task-type", "bug"],
+        vec!["search", "central", "--plain", "--task-type", "feature,bug"],
+        vec!["search", "central", "--plain", "--priority", "High"],
+        vec!["search", "central", "--plain", "--project", "web"],
+        vec![
+            "search",
+            "central",
+            "--plain",
+            "--modified-file",
+            "src/main.rs",
+        ],
+        vec![
+            "search",
+            "central",
+            "--plain",
+            "--max-count",
+            "2",
+            "--skip",
+            "1",
+        ],
+        vec!["search", "central", "--plain", "--count"],
+        vec![
+            "search",
+            "central",
+            "--json",
+            "--max-count",
+            "2",
+            "--skip",
+            "1",
+        ],
+        vec!["search", "--json"],
+        vec!["search", "no-such-match", "--plain"],
+        vec!["search", "--plain", "--", "--type"],
+        vec![
+            "search",
+            "central",
+            "--task-type",
+            "bug",
+            "--type",
+            "document",
+            "--plain",
+        ],
+        vec![
+            "search",
+            "central",
+            "--status",
+            "Invalid",
+            "--exclude-status",
+            "Bogus",
+            "--plain",
+        ],
+        vec!["search", "central", "--task-type", "unknown", "--plain"],
+        vec!["search", "central", "--limit", "0", "--plain"],
+    ] {
+        if args.contains(&"--json") {
+            let expected = typescript_cli(&args, &reference.0);
+            let actual = rust_cli(&args, &candidate.0);
+            assert_eq!(
+                actual.status.code(),
+                expected.status.code(),
+                "args: {args:?}"
+            );
+            assert_eq!(actual.stderr, expected.stderr, "args: {args:?}");
+            if expected.status.success() {
+                let expected: Value = serde_json::from_slice(&expected.stdout).unwrap();
+                let actual: Value = serde_json::from_slice(&actual.stdout).unwrap();
+                assert_eq!(actual, expected, "args: {args:?}");
+            } else {
+                assert_eq!(actual.stdout, expected.stdout, "args: {args:?}");
+            }
+        } else {
+            assert_cli_process_parity(&args, &reference, &candidate);
+        }
+    }
+}
+
 #[test]
 fn rust_task_create_auto_commit_matches_typescript_and_preserves_unrelated_index_entries() {
     let expected_fixture = Fixture::new();
