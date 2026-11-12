@@ -71,18 +71,50 @@ import { createMilestoneFilterValueResolver, NO_MILESTONE_FILTER_VALUE } from ".
 import { createTaskFilterMatcher } from "./src/utils/task-search.ts";
 const milestones = [
  {id:"M-8",title:"Quarterly Roadmap"}, {id:"M-9",title:"M-8"},
- {id:"M-10",title:"Shared"}, {id:"M-11",title:"Shared"}, {id:"M-12",title:"Retired"}, {id:"M-000",title:"Zero"},
+ {id:"M-10",title:"Shared"}, {id:"M-11",title:"Shared"}, {id:"M-12",title:"Retired"}, {id:"M-000",title:"Zero"}, {id:"M-13",title:"Release-1"},
 ];
 const tasks = [
  {id:"TASK-1",milestone:"M-8"}, {id:"TASK-2",milestone:"08"},
  {id:"TASK-3",milestone:"Quarterly Roadmap"}, {id:"TASK-4",milestone:"M-9"},
  {id:"TASK-5",milestone:"Shared"}, {id:"TASK-6",milestone:"M-10"},
  {id:"TASK-7",milestone:"M-11"}, {id:"TASK-8",milestone:"M-12"},
- {id:"TASK-9",milestone:"Retired"}, {id:"TASK-10",milestone:" "}, {id:"TASK-11"}, {id:"TASK-12",milestone:"M-000"},
+ {id:"TASK-9",milestone:"Retired"}, {id:"TASK-10",milestone:" "}, {id:"TASK-11"}, {id:"TASK-12",milestone:"M-000"}, {id:"TASK-13",milestone:"M-13"},
 ];
 const resolver = createMilestoneFilterValueResolver(milestones);
 const selected = query => tasks.filter(createTaskFilterMatcher({milestone:query,resolveMilestoneLabel:resolver},tasks)).map(task=>task.id);
-process.stdout.write(JSON.stringify({alias:selected("08"), zeroAlias:selected("0"), exactIdCollision:selected("M-8"), duplicateTitle:selected("Shared"), archivedAlias:selected("12"), noMilestone:selected(NO_MILESTONE_FILTER_VALUE), blank:selected(" ")}));
+process.stdout.write(JSON.stringify({alias:selected("08"), zeroAlias:selected("0"), exactIdCollision:selected("M-8"), duplicateTitle:selected("Shared"), archivedAlias:selected("12"), noMilestone:selected(NO_MILESTONE_FILTER_VALUE), blank:selected(" "), partial:selected("roadmp"), typo:selected("releas-1"), normalized:selected("QUARTERLY--ROADMAP"), unmatched:selected("zzz-unrelated-milestone")}));
+"#;
+    let output =
+        Command::new(std::env::var_os("BACKLOG_REFERENCE_BUN").unwrap_or_else(|| "bun".into()))
+            .args(["--eval", script])
+            .current_dir(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).unwrap()
+}
+
+fn milestone_corpus_reference() -> Value {
+    let script = r#"
+import { createMilestoneFilterValueResolver } from "./src/utils/milestone-filter.ts";
+import { createTaskFilterMatcher } from "./src/utils/task-search.ts";
+const milestones = [
+ {id:"M-20",title:"Roadmap Alpha"}, {id:"M-21",title:"Roadmap Beta"},
+];
+const corpus = [
+ {id:"TASK-20",status:"Done",milestone:"M-20"},
+ {id:"TASK-21",status:"To Do",milestone:"M-21"},
+];
+const visible = corpus.filter(task=>task.status==="To Do");
+const resolver = createMilestoneFilterValueResolver(milestones);
+const matcher = createTaskFilterMatcher({status:["To Do"],milestone:"roadmap a",resolveMilestoneLabel:resolver},corpus);
+process.stdout.write(JSON.stringify(visible.filter(matcher).map(task=>task.id)));
 "#;
     let output =
         Command::new(std::env::var_os("BACKLOG_REFERENCE_BUN").unwrap_or_else(|| "bun".into()))
@@ -166,14 +198,14 @@ fn task_field_filters_match_typescript_normalization_and_composition() {
     };
     let active = tasks.as_slice();
     let rust = json!({
-        "combined": ids(&filter_tasks(active, &combined, "task", &[])),
-        "labelsAllParent": ids(&filter_tasks(active, &labels_all_parent, "task", &[])),
-        "unassigned": ids(&filter_tasks(active, &unassigned, "task", &[])),
-        "excluded": ids(&filter_tasks(active, &excluded, "task", &[])),
-        "empty": ids(&filter_tasks(active, &empty, "task", &[])),
-        "modifiedMany": ids(&filter_tasks(active, &modified_many, "task", &[])),
-        "modifiedEmpty": ids(&filter_tasks(active, &modified_empty, "task", &[])),
-        "modifiedUnmatched": ids(&filter_tasks(active, &modified_unmatched, "task", &[])),
+        "combined": ids(&filter_tasks(active, &combined, "task", &[], active)),
+        "labelsAllParent": ids(&filter_tasks(active, &labels_all_parent, "task", &[], active)),
+        "unassigned": ids(&filter_tasks(active, &unassigned, "task", &[], active)),
+        "excluded": ids(&filter_tasks(active, &excluded, "task", &[], active)),
+        "empty": ids(&filter_tasks(active, &empty, "task", &[], active)),
+        "modifiedMany": ids(&filter_tasks(active, &modified_many, "task", &[], active)),
+        "modifiedEmpty": ids(&filter_tasks(active, &modified_empty, "task", &[], active)),
+        "modifiedUnmatched": ids(&filter_tasks(active, &modified_unmatched, "task", &[], active)),
     });
     assert_eq!(reference(), rust);
 }
@@ -193,6 +225,7 @@ fn milestone_filters_match_active_archive_alias_title_collision_and_empty_values
         ("TASK-10", Some(" ")),
         ("TASK-11", None),
         ("TASK-12", Some("M-000")),
+        ("TASK-13", Some("M-13")),
     ]
     .into_iter()
     .map(|(id, value)| {
@@ -208,6 +241,7 @@ fn milestone_filters_match_active_archive_alias_title_collision_and_empty_values
         milestone("M-11", "Shared"),
         milestone("M-12", "Retired"),
         milestone("M-000", "Zero"),
+        milestone("M-13", "Release-1"),
     ];
     let active_and_archived = milestones.as_slice();
     let select = |query: &str| {
@@ -215,12 +249,63 @@ fn milestone_filters_match_active_archive_alias_title_collision_and_empty_values
             milestone: Some(query.into()),
             ..TaskFilter::default()
         };
-        ids(&filter_tasks(&tasks, &filter, "task", active_and_archived))
+        ids(&filter_tasks(
+            &tasks,
+            &filter,
+            "task",
+            active_and_archived,
+            &tasks,
+        ))
     };
     let rust = json!({
         "alias": select("08"), "zeroAlias": select("0"), "exactIdCollision": select("M-8"),
         "duplicateTitle": select("Shared"), "archivedAlias": select("12"),
         "noMilestone": select("\0no-milestone"), "blank": select(" "),
+        "partial": select("roadmp"), "typo": select("releas-1"),
+        "normalized": select("QUARTERLY--ROADMAP"), "unmatched": select("zzz-unrelated-milestone"),
     });
     assert_eq!(milestone_reference(), rust);
+}
+
+#[test]
+fn fuzzy_milestone_resolution_uses_the_full_corpus_after_other_filters() {
+    let corpus = vec![
+        {
+            let mut task = task("TASK-20", "Done");
+            task.milestone = Some("M-20".into());
+            task
+        },
+        {
+            let mut task = task("TASK-21", "To Do");
+            task.milestone = Some("M-21".into());
+            task
+        },
+    ];
+    let visible = vec![corpus[1].clone()];
+    let milestones = vec![
+        milestone("M-20", "Roadmap Alpha"),
+        milestone("M-21", "Roadmap Beta"),
+    ];
+    let filter = TaskFilter {
+        statuses: vec!["To Do".into()],
+        milestone: Some("roadmap a".into()),
+        ..TaskFilter::default()
+    };
+
+    let rust = ids(&filter_tasks(
+        &visible,
+        &filter,
+        "task",
+        &milestones,
+        &corpus,
+    ));
+    let filtered_corpus = ids(&filter_tasks(
+        &visible,
+        &filter,
+        "task",
+        &milestones,
+        &visible,
+    ));
+    assert_eq!(filtered_corpus, ["TASK-21"]);
+    assert_eq!(milestone_corpus_reference(), json!(rust));
 }

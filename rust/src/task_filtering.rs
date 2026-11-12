@@ -32,11 +32,13 @@ pub struct TaskFilter {
 /// Return matching task records in their original order.
 ///
 /// Supply active and archived milestones together so aliases resolve across both stores.
+/// Supply the full task corpus for stable fuzzy milestone resolution, even when `tasks` is a subset.
 pub fn filter_tasks<'a>(
     tasks: &'a [TaskRecord],
     filter: &TaskFilter,
     prefix: &str,
     milestones: &[MilestoneRecord],
+    milestone_corpus: &[TaskRecord],
 ) -> Vec<&'a TaskRecord> {
     let statuses = normalized_set(&filter.statuses, false);
     let excluded_statuses = normalized_set(&filter.exclude_statuses, false);
@@ -55,11 +57,18 @@ pub fn filter_tasks<'a>(
         .parent_task_id
         .as_deref()
         .filter(|parent_id| !parent_id.is_empty());
+    let milestone_values = milestone_corpus
+        .iter()
+        .filter_map(|task| task.milestone.as_deref())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
     let milestone_matcher = filter
         .milestone
         .as_deref()
         .filter(|query| !query.trim().is_empty())
-        .map(|query| crate::milestone_filtering::MilestoneMatcher::new(query, milestones));
+        .map(|query| {
+            crate::milestone_filtering::MilestoneMatcher::new(query, milestones, &milestone_values)
+        });
 
     tasks
         .iter()
