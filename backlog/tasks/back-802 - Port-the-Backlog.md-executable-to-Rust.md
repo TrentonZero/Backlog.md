@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@codex'
 created_date: '2026-11-07T21:53:00Z'
-updated_date: '2026-11-12T00:28:00Z'
+updated_date: '2026-11-12T00:38:00Z'
 labels: []
 dependencies:
   - BACK-801
@@ -121,4 +121,6 @@ BACK-802.36 completed: exact Rust milestone filtering now resolves stored IDs, n
 BACK-802.37 completed: Rust now applies Fuse-compatible closest-title milestone matching with stable full-corpus candidate resolution, preserving exact ID/title and no-milestone precedence. Live TypeScript parity covers fuzzy partial and typo queries, normalization, unmatched queries, and the hidden-closest-candidate case. Full Rust suite, clippy, rustfmt, and focused TypeScript milestone tests (27) passed. Cold and complexity reviews cleared the implementation. Groma agent-instructions is unavailable in this environment.
 
 BACK-802.38 completed: added the Rust searchable body and indexed field builder with live TypeScript parity for field order, optional fields, criteria/comments, ID and dependency variants, and large numeric IDs. Full Rust suite, Clippy, rustfmt, and task-search parity (17 tests) passed; reviews found no blockers. Groma remains unavailable.
+
+BACK-802.39 completed: implemented Fuse-compatible Rust task search with stable relevance ordering and shared full-corpus filter semantics. Full Rust suite, Clippy, rustfmt, focused TypeScript parity (49 tests), Biome check, and diff check passed; cold simplicity and complexity reviews found no blockers. Groma remains unavailable (command not found). Remaining migration work includes other app/query behavior, canonical CLI, HTTP/WebSocket browser server, MCP, TUI, distribution, and final compatibility/cutover gates.
 <!-- SECTION:NOTES:END -->

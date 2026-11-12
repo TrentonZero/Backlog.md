@@ -8,6 +8,7 @@ pub mod discovery;
 pub mod document_store;
 pub mod draft_store;
 pub mod frontmatter;
+mod fuzzy;
 pub mod git;
 pub mod identity;
 mod milestone_filtering;

@@ -1,6 +1,10 @@
 //! Canonical searchable text and fields shared by task search surfaces.
 
-use crate::records::TaskRecord;
+use crate::{
+    fuzzy::{bitap_search, field_norm},
+    records::{MilestoneRecord, TaskRecord},
+    task_filtering::{TaskFilter, TaskFilterMatcher},
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TaskSearchFields {
@@ -10,6 +14,53 @@ pub struct TaskSearchFields {
     pub id_variants: Vec<String>,
     pub dependency_ids: Vec<String>,
     pub modified_files: Vec<String>,
+}
+
+/// In-memory task search index with Fuse-compatible relevance order.
+pub struct TaskSearchIndex<'a> {
+    tasks: &'a [TaskRecord],
+    milestones: &'a [MilestoneRecord],
+    fields: Vec<TaskSearchFields>,
+}
+
+impl<'a> TaskSearchIndex<'a> {
+    pub fn new(tasks: &'a [TaskRecord], milestones: &'a [MilestoneRecord]) -> Self {
+        Self {
+            tasks,
+            milestones,
+            fields: tasks.iter().map(build_task_search_fields).collect(),
+        }
+    }
+
+    /// Search indexed task text, then apply shared exact filters to the ranked results.
+    pub fn search(&self, query: &str, filter: &TaskFilter, prefix: &str) -> Vec<&'a TaskRecord> {
+        let matcher = TaskFilterMatcher::new(filter, prefix, self.milestones, self.tasks);
+        let query = query.trim();
+        if query.is_empty() {
+            return self
+                .tasks
+                .iter()
+                .filter(|task| matcher.matches(task))
+                .collect();
+        }
+
+        let mut ranked = self
+            .fields
+            .iter()
+            .enumerate()
+            .filter_map(|(index, fields)| {
+                task_search_score(query, fields).map(|score| (score, index))
+            })
+            .collect::<Vec<_>>();
+        ranked.sort_by(|left, right| left.0.total_cmp(&right.0).then(left.1.cmp(&right.1)));
+        ranked
+            .into_iter()
+            .filter_map(|(_, index)| {
+                let task = &self.tasks[index];
+                matcher.matches(task).then_some(task)
+            })
+            .collect()
+    }
 }
 
 /// Build the body text indexed alongside a task title and identity.
@@ -84,6 +135,35 @@ pub fn build_task_search_fields(task: &TaskRecord) -> TaskSearchFields {
             .collect(),
         modified_files: task.modified_files.clone(),
     }
+}
+
+fn task_search_score(query: &str, fields: &TaskSearchFields) -> Option<f64> {
+    let values = [
+        (std::slice::from_ref(&fields.title), 0.35),
+        (std::slice::from_ref(&fields.body_text), 0.3),
+        (std::slice::from_ref(&fields.id), 0.2),
+        (&fields.id_variants, 0.1),
+        (&fields.dependency_ids, 0.05),
+        (&fields.modified_files, 0.15),
+    ];
+    let total_weight = values.iter().map(|(_, weight)| *weight).sum::<f64>();
+    let mut total_score = 1.0;
+    let mut matched = false;
+
+    for (texts, weight) in values {
+        for text in texts {
+            if text.trim().is_empty() {
+                continue;
+            }
+            if let Some(score) = bitap_search(query, text, 0.35, 1) {
+                matched = true;
+                let score = if score == 0.0 { f64::EPSILON } else { score };
+                total_score *= score.powf((weight / total_weight) * field_norm(text));
+            }
+        }
+    }
+
+    matched.then_some(total_score)
 }
 
 fn task_id_search_variants(id: &str) -> Vec<String> {

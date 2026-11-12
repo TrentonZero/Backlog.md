@@ -40,126 +40,167 @@ pub fn filter_tasks<'a>(
     milestones: &[MilestoneRecord],
     milestone_corpus: &[TaskRecord],
 ) -> Vec<&'a TaskRecord> {
-    let statuses = normalized_set(&filter.statuses, false);
-    let excluded_statuses = normalized_set(&filter.exclude_statuses, false);
-    let types = normalized_set(&filter.types, false);
-    let projects = normalized_set(&filter.projects, false);
-    let priorities = normalized_set(&filter.priorities, true);
-    let assignees = normalized_set(&filter.assignees, false);
-    let labels: Vec<_> = filter
-        .labels
-        .iter()
-        .map(|label| label.trim().to_lowercase())
-        .filter(|label| !label.is_empty())
-        .collect();
-    let modified_files = normalized_set(&filter.modified_files, false);
-    let parent_id = filter
-        .parent_task_id
-        .as_deref()
-        .filter(|parent_id| !parent_id.is_empty());
-    let milestone_values = milestone_corpus
-        .iter()
-        .filter_map(|task| task.milestone.as_deref())
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
-    let milestone_matcher = filter
-        .milestone
-        .as_deref()
-        .filter(|query| !query.trim().is_empty())
-        .map(|query| {
-            crate::milestone_filtering::MilestoneMatcher::new(query, milestones, &milestone_values)
-        });
+    let matcher = TaskFilterMatcher::new(filter, prefix, milestones, milestone_corpus);
+    tasks.iter().filter(|task| matcher.matches(task)).collect()
+}
 
-    tasks
-        .iter()
-        .filter(|task| {
-            if !statuses.is_empty() && !statuses.contains(&task.status.to_lowercase()) {
+pub(crate) struct TaskFilterMatcher<'a> {
+    statuses: HashSet<String>,
+    excluded_statuses: HashSet<String>,
+    types: HashSet<String>,
+    projects: HashSet<String>,
+    priorities: HashSet<String>,
+    assignees: HashSet<String>,
+    unassigned: bool,
+    labels: Vec<String>,
+    label_match: LabelMatch,
+    modified_files: HashSet<String>,
+    parent_id: Option<String>,
+    prefix: String,
+    milestone: Option<crate::milestone_filtering::MilestoneMatcher<'a>>,
+}
+
+impl<'a> TaskFilterMatcher<'a> {
+    pub(crate) fn new(
+        filter: &TaskFilter,
+        prefix: &str,
+        milestones: &'a [MilestoneRecord],
+        milestone_corpus: &[TaskRecord],
+    ) -> Self {
+        let milestone_values = milestone_corpus
+            .iter()
+            .filter_map(|task| task.milestone.as_deref())
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let milestone = filter
+            .milestone
+            .as_deref()
+            .filter(|query| !query.trim().is_empty())
+            .map(|query| {
+                crate::milestone_filtering::MilestoneMatcher::new(
+                    query,
+                    milestones,
+                    &milestone_values,
+                )
+            });
+        Self {
+            statuses: normalized_set(&filter.statuses, false),
+            excluded_statuses: normalized_set(&filter.exclude_statuses, false),
+            types: normalized_set(&filter.types, false),
+            projects: normalized_set(&filter.projects, false),
+            priorities: normalized_set(&filter.priorities, true),
+            assignees: normalized_set(&filter.assignees, false),
+            unassigned: filter.unassigned,
+            labels: filter
+                .labels
+                .iter()
+                .map(|label| label.trim().to_lowercase())
+                .filter(|label| !label.is_empty())
+                .collect(),
+            label_match: filter.label_match,
+            modified_files: normalized_set(&filter.modified_files, false),
+            parent_id: filter
+                .parent_task_id
+                .as_deref()
+                .filter(|parent_id| !parent_id.is_empty())
+                .map(str::to_owned),
+            prefix: prefix.to_owned(),
+            milestone,
+        }
+    }
+
+    pub(crate) fn matches(&self, task: &TaskRecord) -> bool {
+        if !self.statuses.is_empty() && !self.statuses.contains(&task.status.to_lowercase()) {
+            return false;
+        }
+        if self.excluded_statuses.contains(&task.status.to_lowercase()) {
+            return false;
+        }
+        if !self.types.is_empty()
+            && !task
+                .task_type
+                .as_deref()
+                .map(|value| value.trim().to_lowercase())
+                .is_some_and(|value| self.types.contains(&value))
+        {
+            return false;
+        }
+        if !self.projects.is_empty()
+            && !task
+                .project
+                .as_deref()
+                .map(|value| value.trim().to_lowercase())
+                .is_some_and(|value| self.projects.contains(&value))
+        {
+            return false;
+        }
+        if !self.priorities.is_empty()
+            && !task
+                .priority
+                .as_deref()
+                .map(normalize_priority)
+                .is_some_and(|value| self.priorities.contains(&value))
+        {
+            return false;
+        }
+        if !self.assignees.is_empty()
+            && !task
+                .assignee
+                .iter()
+                .any(|value| self.assignees.contains(&value.trim().to_lowercase()))
+        {
+            return false;
+        }
+        if self.unassigned && task.assignee.iter().any(|value| !value.trim().is_empty()) {
+            return false;
+        }
+        if !self.labels.is_empty() {
+            let task_labels: HashSet<_> = task
+                .labels
+                .iter()
+                .map(|label| label.trim().to_lowercase())
+                .filter(|label| !label.is_empty())
+                .collect();
+            if task_labels.is_empty() {
                 return false;
             }
-            if excluded_statuses.contains(&task.status.to_lowercase()) {
+            let matches = match self.label_match {
+                LabelMatch::Any => self.labels.iter().any(|label| task_labels.contains(label)),
+                LabelMatch::All => self.labels.iter().all(|label| task_labels.contains(label)),
+            };
+            if !matches {
                 return false;
             }
-            if !types.is_empty()
-                && !task
-                    .task_type
-                    .as_deref()
-                    .map(|value| value.trim().to_lowercase())
-                    .is_some_and(|value| types.contains(&value))
-            {
-                return false;
-            }
-            if !projects.is_empty()
-                && !task
-                    .project
-                    .as_deref()
-                    .map(|value| value.trim().to_lowercase())
-                    .is_some_and(|value| projects.contains(&value))
-            {
-                return false;
-            }
-            if !priorities.is_empty()
-                && !task
-                    .priority
-                    .as_deref()
-                    .map(normalize_priority)
-                    .is_some_and(|value| priorities.contains(&value))
-            {
-                return false;
-            }
-            if !assignees.is_empty()
-                && !task
-                    .assignee
-                    .iter()
-                    .any(|value| assignees.contains(&value.trim().to_lowercase()))
-            {
-                return false;
-            }
-            if filter.unassigned && task.assignee.iter().any(|value| !value.trim().is_empty()) {
-                return false;
-            }
-            if !labels.is_empty() {
-                let task_labels: HashSet<_> = task
-                    .labels
-                    .iter()
-                    .map(|label| label.trim().to_lowercase())
-                    .filter(|label| !label.is_empty())
-                    .collect();
-                if task_labels.is_empty() {
-                    return false;
-                }
-                let matches = match filter.label_match {
-                    LabelMatch::Any => labels.iter().any(|label| task_labels.contains(label)),
-                    LabelMatch::All => labels.iter().all(|label| task_labels.contains(label)),
-                };
-                if !matches {
-                    return false;
-                }
-            }
-            if !modified_files.is_empty()
-                && !task.modified_files.iter().any(|path| {
-                    let path = path.trim().to_lowercase();
-                    !path.is_empty() && modified_files.iter().any(|filter| path.contains(filter))
-                })
-            {
-                return false;
-            }
-            if let Some(parent_id) = parent_id
-                && !task
-                    .parent_task_id
-                    .as_deref()
-                    .is_some_and(|task_parent| task_ids_equal(parent_id, task_parent, prefix))
-            {
-                return false;
-            }
-            if milestone_matcher
-                .as_ref()
-                .is_some_and(|matcher| !matcher.matches(task.milestone.as_deref()))
-            {
-                return false;
-            }
-            true
-        })
-        .collect()
+        }
+        if !self.modified_files.is_empty()
+            && !task.modified_files.iter().any(|path| {
+                let path = path.trim().to_lowercase();
+                !path.is_empty()
+                    && self
+                        .modified_files
+                        .iter()
+                        .any(|filter| path.contains(filter))
+            })
+        {
+            return false;
+        }
+        if let Some(parent_id) = &self.parent_id
+            && !task
+                .parent_task_id
+                .as_deref()
+                .is_some_and(|task_parent| task_ids_equal(parent_id, task_parent, &self.prefix))
+        {
+            return false;
+        }
+        if self
+            .milestone
+            .as_ref()
+            .is_some_and(|matcher| !matcher.matches(task.milestone.as_deref()))
+        {
+            return false;
+        }
+        true
+    }
 }
 
 fn normalized_set(values: &[String], collapse_whitespace: bool) -> HashSet<String> {
