@@ -4209,6 +4209,527 @@ fn rust_milestone_add_auto_commits_only_the_created_file() {
 }
 
 #[test]
+fn rust_milestone_group_invocation_matches_typescript_help_channel_and_status() {
+    for alias in ["milestone", "milestones"] {
+        let fixture = Fixture::new();
+        let expected = typescript_cli(&[alias], &fixture.0);
+        let actual = rust_cli(&[alias], &fixture.0);
+        assert_eq!(actual.status.code(), expected.status.code(), "{alias}");
+        assert!(
+            expected.stdout.is_empty(),
+            "{alias}: TS unexpectedly printed stdout"
+        );
+        assert!(
+            actual.stdout.is_empty(),
+            "{alias}: Rust printed help to stdout"
+        );
+        let expected_help = String::from_utf8_lossy(&expected.stderr);
+        let actual_help = String::from_utf8_lossy(&actual.stderr);
+        assert!(!expected_help.is_empty(), "{alias}: TS did not print help");
+        for command in ["list", "add", "rename", "archive", "remove"] {
+            assert!(
+                expected_help.contains(command),
+                "{alias}: TS help missing {command}"
+            );
+            assert!(
+                actual_help.contains(command),
+                "{alias}: Rust help missing {command}"
+            );
+        }
+    }
+}
+
+#[test]
+fn rust_milestone_rename_auto_commits_only_the_moved_record_and_matching_tasks() {
+    let reference = Fixture::new();
+    let candidate = Fixture::new();
+    for fixture in [&reference, &candidate] {
+        fixture.file(
+            "backlog.config.yml",
+            "project_name: CLI Fixture\ntask_prefix: task\nstatuses:\n  - To Do\n  - Done\nauto_commit: true\n",
+        );
+        fixture.file(
+            "backlog/milestones/m-0 - release-a.md",
+            "---\nid: m-0\ntitle: Release A\n---\n",
+        );
+        fixture.file(
+            "backlog/tasks/task-1.md",
+            "---\nid: task-1\ntitle: Task A\nstatus: To Do\nmilestone: Release A\n---\n",
+        );
+        initialize_git_fixture(fixture);
+    }
+    let args = ["milestone", "rename", "Release A", "Release Prime"];
+    let expected = typescript_cli(&args, &reference.0);
+    let actual = rust_cli(&args, &candidate.0);
+    assert_eq!(actual.status.code(), expected.status.code());
+    let expected_stdout = String::from_utf8(expected.stdout)
+        .unwrap()
+        .replace(&reference.0.display().to_string(), "FIXTURE_ROOT");
+    let actual_stdout = String::from_utf8(actual.stdout)
+        .unwrap()
+        .replace(&candidate.0.display().to_string(), "FIXTURE_ROOT");
+    assert_eq!(actual_stdout, expected_stdout);
+    assert_eq!(actual.stderr, expected.stderr);
+    assert_eq!(
+        selected_commit_result(&candidate),
+        selected_commit_result(&reference)
+    );
+    let (message, committed_files, staged_files) = selected_commit_result(&candidate);
+    assert_eq!(message, "backlog: Rename milestone m-0");
+    assert!(committed_files.contains("backlog/milestones/"));
+    assert!(committed_files.contains("backlog/tasks/task-1.md"));
+    assert_eq!(staged_files, "UNRELATED.txt");
+}
+
+#[cfg(unix)]
+#[test]
+fn rust_milestone_rename_reports_original_commit_error_and_file_rollback_failure() {
+    let setup = |fixture: &Fixture| {
+        fixture.file(
+            "backlog.config.yml",
+            "project_name: CLI Fixture\ntask_prefix: task\nstatuses:\n  - To Do\n  - Done\nauto_commit: true\n",
+        );
+        let relative_path = "backlog/milestones/m-0 - release-a.md";
+        fixture.file(
+            relative_path,
+            "---\nid: m-0\ntitle: Release A\n---\n\nDescription.\n",
+        );
+        initialize_git_fixture(fixture);
+
+        let old_path = fixture.0.join(relative_path).to_string_lossy().to_string();
+        let quoted_path = format!("'{}'", old_path.replace('\'', "'\\''"));
+        let hook = format!(
+            "#!/bin/sh\nrm -f {quoted_path}\nmkdir {quoted_path}\nprintf 'forced commit hook failure\\n' >&2\nexit 1\n"
+        );
+        let hook_path = fixture.0.join(".git/hooks/pre-commit");
+        std::fs::write(&hook_path, hook).unwrap();
+        let mut permissions = std::fs::metadata(&hook_path).unwrap().permissions();
+        use std::os::unix::fs::PermissionsExt;
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&hook_path, permissions).unwrap();
+    };
+
+    let reference = Fixture::new();
+    let candidate = Fixture::new();
+    setup(&reference);
+    setup(&candidate);
+    let args = ["milestone", "rename", "Release A", "Release Prime"];
+    let expected = typescript_cli(&args, &reference.0);
+    let actual = rust_cli(&args, &candidate.0);
+    assert_eq!(actual.status.code(), expected.status.code());
+    assert_eq!(actual.stdout, expected.stdout);
+    assert!(
+        String::from_utf8_lossy(&expected.stderr)
+            .contains("failed to rollback milestone file rename")
+    );
+    let actual_error = String::from_utf8_lossy(&actual.stderr);
+    assert!(actual_error.contains("forced commit hook failure"));
+    assert!(actual_error.contains("failed to rollback milestone file rename"));
+    let expected_renamed_path = reference
+        .0
+        .join("backlog/milestones/m-0 - release-prime.md");
+    assert!(expected_renamed_path.exists());
+    let expected_renamed_bytes = std::fs::read(expected_renamed_path).unwrap();
+    let actual_renamed_path = candidate
+        .0
+        .join("backlog/milestones/m-0 - release-prime.md");
+    assert!(actual_renamed_path.exists());
+    let actual_renamed_bytes = std::fs::read(actual_renamed_path).unwrap();
+    assert_eq!(actual_renamed_bytes, expected_renamed_bytes);
+}
+
+#[cfg(unix)]
+#[test]
+fn rust_milestone_rename_restores_original_file_after_commit_failure() {
+    let source = "---\nid: m-0\ntitle: Release A\nowner: platform\n---\n\n## Description\n\nOriginal milestone body.\n";
+    let setup = |fixture: &Fixture| {
+        fixture.file(
+            "backlog.config.yml",
+            "project_name: CLI Fixture\ntask_prefix: task\nstatuses:\n  - To Do\n  - Done\nauto_commit: true\n",
+        );
+        fixture.file("backlog/milestones/m-0 - release-a.md", source);
+        initialize_git_fixture(fixture);
+        let hook_path = fixture.0.join(".git/hooks/pre-commit");
+        std::fs::write(
+            &hook_path,
+            "#!/bin/sh\nprintf 'forced commit hook failure\\n' >&2\nexit 1\n",
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&hook_path).unwrap().permissions();
+        use std::os::unix::fs::PermissionsExt;
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&hook_path, permissions).unwrap();
+    };
+    let reference = Fixture::new();
+    let candidate = Fixture::new();
+    setup(&reference);
+    setup(&candidate);
+    let args = ["milestone", "rename", "Release A", "Release Prime"];
+    let expected = typescript_cli(&args, &reference.0);
+    let actual = rust_cli(&args, &candidate.0);
+    assert_eq!(actual.status.code(), expected.status.code());
+    let original_path = candidate.0.join("backlog/milestones/m-0 - release-a.md");
+    let renamed_path = candidate
+        .0
+        .join("backlog/milestones/m-0 - release-prime.md");
+    assert!(original_path.exists());
+    assert!(!renamed_path.exists());
+    let restored = std::fs::read(original_path).unwrap();
+    assert_eq!(restored, source.as_bytes());
+}
+
+#[test]
+fn rust_milestone_rename_matches_typescript_task_updates_and_due_dates() {
+    let source = "---\nid: m-0\ntitle: Release A\ndue_date: \"2026-08-15\"\nowner: platform # preserve\n---\n\n## Description\n\nMilestone: Release A\n\nKeep this custom description.\n";
+    let setup = |fixture: &Fixture| {
+        fixture.file("backlog/milestones/m-0 - release-a.md", source);
+        fixture.file(
+            "backlog/tasks/task-1-title.md",
+            "---\nid: task-1\ntitle: Title reference\nstatus: To Do\nmilestone: Release A\nowner: platform\n---\n\nTask body stays.\n",
+        );
+        fixture.file(
+            "backlog/tasks/task-2-id.md",
+            "---\nid: task-2\ntitle: ID reference\nstatus: In Progress\nmilestone: m-0\n---\n",
+        );
+    };
+    let reference = Fixture::new();
+    let candidate = Fixture::new();
+    setup(&reference);
+    setup(&candidate);
+
+    let assert_rename_parity = |args: &[&str], reference: &Fixture, candidate: &Fixture| {
+        let expected = typescript_cli(args, &reference.0);
+        let actual = rust_cli(args, &candidate.0);
+        assert_eq!(
+            actual.status.code(),
+            expected.status.code(),
+            "args: {args:?}"
+        );
+        let expected_stdout = String::from_utf8(expected.stdout)
+            .unwrap()
+            .replace(&reference.0.display().to_string(), "FIXTURE_ROOT");
+        let actual_stdout = String::from_utf8(actual.stdout)
+            .unwrap()
+            .replace(&candidate.0.display().to_string(), "FIXTURE_ROOT");
+        assert_eq!(actual_stdout, expected_stdout, "args: {args:?}");
+        assert_eq!(actual.stderr, expected.stderr, "args: {args:?}");
+    };
+    assert_rename_parity(
+        &["milestone", "rename", "Release A", "Release Prime"],
+        &reference,
+        &candidate,
+    );
+    let renamed = std::fs::read_to_string(
+        candidate
+            .0
+            .join("backlog/milestones/m-0 - release-prime.md"),
+    )
+    .unwrap();
+    assert!(renamed.contains("due_date: \"2026-08-15\""));
+    assert!(renamed.contains("Milestone: Release A"));
+    assert!(renamed.contains("Keep this custom description."));
+    for path in ["task-1-title.md", "task-2-id.md"] {
+        let task = std::fs::read_to_string(candidate.0.join("backlog/tasks").join(path)).unwrap();
+        assert!(task.contains("milestone: m-0"));
+    }
+    assert!(
+        std::fs::read_to_string(candidate.0.join("backlog/tasks/task-1-title.md"))
+            .unwrap()
+            .contains("Task body stays.")
+    );
+
+    let no_update_reference = Fixture::new();
+    let no_update_candidate = Fixture::new();
+    setup(&no_update_reference);
+    setup(&no_update_candidate);
+    assert_rename_parity(
+        &[
+            "milestone",
+            "rename",
+            "m-0",
+            "Release Prime",
+            "--no-update-tasks",
+        ],
+        &no_update_reference,
+        &no_update_candidate,
+    );
+    assert!(
+        std::fs::read_to_string(no_update_candidate.0.join("backlog/tasks/task-1-title.md"))
+            .unwrap()
+            .contains("milestone: Release A")
+    );
+
+    for (args, expected_due) in [
+        (
+            vec![
+                "milestone",
+                "rename",
+                "m-0",
+                "Release Prime",
+                "--due-date",
+                "2026-09-01",
+            ],
+            Some("due_date: \"2026-09-01\""),
+        ),
+        (
+            vec![
+                "milestone",
+                "rename",
+                "m-0",
+                "Release Prime",
+                "--clear-due-date",
+            ],
+            None,
+        ),
+    ] {
+        let reference = Fixture::new();
+        let candidate = Fixture::new();
+        for fixture in [&reference, &candidate] {
+            fixture.file(
+                "backlog/milestones/m-0 - release-prime.md",
+                &source.replace("Release A", "Release Prime"),
+            );
+        }
+        assert_cli_process_parity(&args, &reference, &candidate);
+        let contents = std::fs::read_to_string(
+            candidate
+                .0
+                .join("backlog/milestones/m-0 - release-prime.md"),
+        )
+        .unwrap();
+        assert_eq!(contents.contains("due_date:"), expected_due.is_some());
+        if let Some(expected_due) = expected_due {
+            assert!(contents.contains(expected_due));
+        }
+    }
+
+    let reference = Fixture::new();
+    let candidate = Fixture::new();
+    for fixture in [&reference, &candidate] {
+        fixture.file("backlog/milestones/m-0 - release-a.md", source);
+    }
+    assert_cli_process_parity(
+        &[
+            "milestone",
+            "rename",
+            "Release A",
+            "Release Prime",
+            "--due-date",
+            "2026-09-01",
+            "--clear-due-date",
+        ],
+        &reference,
+        &candidate,
+    );
+    assert!(
+        candidate
+            .0
+            .join("backlog/milestones/m-0 - release-a.md")
+            .exists()
+    );
+}
+
+#[test]
+fn rust_milestone_archive_matches_typescript_moves_and_identity_errors() {
+    let source = "---\nid: m-0\ntitle: Release A\nowner: platform\n---\n\nCustom milestone text.\n";
+    let reference = Fixture::new();
+    let candidate = Fixture::new();
+    for fixture in [&reference, &candidate] {
+        fixture.file("backlog/milestones/m-0 - release-a.md", source);
+    }
+    assert_cli_process_parity(
+        &["milestone", "archive", "Release A"],
+        &reference,
+        &candidate,
+    );
+    assert!(
+        !candidate
+            .0
+            .join("backlog/milestones/m-0 - release-a.md")
+            .exists()
+    );
+    assert_eq!(
+        std::fs::read_to_string(
+            candidate
+                .0
+                .join("backlog/archive/milestones/m-0 - release-a.md"),
+        )
+        .unwrap(),
+        source
+    );
+    assert_cli_process_parity(
+        &["milestone", "archive", "Release A"],
+        &reference,
+        &candidate,
+    );
+
+    let missing_reference = Fixture::new();
+    let missing_candidate = Fixture::new();
+    assert_cli_process_parity(
+        &["milestone", "archive", "missing"],
+        &missing_reference,
+        &missing_candidate,
+    );
+
+    let ambiguous_reference = Fixture::new();
+    let ambiguous_candidate = Fixture::new();
+    for fixture in [&ambiguous_reference, &ambiguous_candidate] {
+        fixture.file(
+            "backlog/milestones/m-0 - shared.md",
+            "---\nid: m-0\ntitle: Shared\n---\n",
+        );
+        fixture.file(
+            "backlog/milestones/m-1 - shared-other.md",
+            "---\nid: m-1\ntitle: Shared\n---\n",
+        );
+    }
+    assert_cli_process_parity(
+        &["milestone", "archive", "Shared"],
+        &ambiguous_reference,
+        &ambiguous_candidate,
+    );
+    assert!(
+        ambiguous_candidate
+            .0
+            .join("backlog/milestones/m-0 - shared.md")
+            .exists()
+    );
+}
+
+#[test]
+fn rust_milestone_remove_matches_typescript_task_handling_and_refusals() {
+    let setup = |fixture: &Fixture| {
+        fixture.file(
+            "backlog/milestones/m-0 - release-a.md",
+            "---\nid: m-0\ntitle: Release A\nowner: platform\n---\n",
+        );
+        fixture.file(
+            "backlog/milestones/m-1 - release-b.md",
+            "---\nid: m-1\ntitle: Release B\n---\n",
+        );
+        fixture.file(
+            "backlog/tasks/task-1.md",
+            "---\nid: task-1\ntitle: Task A\nstatus: To Do\nmilestone: Release A\nowner: keep\n---\n\nTask body.\n",
+        );
+        fixture.file(
+            "backlog/tasks/task-2.md",
+            "---\nid: task-2\ntitle: Task B\nstatus: Done\nmilestone: m-0\n---\n",
+        );
+    };
+    for (args, handling) in [
+        (vec!["milestone", "remove", "Release A"], "clear"),
+        (
+            vec![
+                "milestone",
+                "remove",
+                "Release A",
+                "--task-handling",
+                "keep",
+            ],
+            "keep",
+        ),
+        (
+            vec![
+                "milestone",
+                "remove",
+                "Release A",
+                "--task-handling",
+                "reassign",
+                "--reassign-to",
+                "Release B",
+            ],
+            "reassign",
+        ),
+    ] {
+        let reference = Fixture::new();
+        let candidate = Fixture::new();
+        setup(&reference);
+        setup(&candidate);
+        assert_cli_process_parity(&args, &reference, &candidate);
+        for path in ["task-1.md", "task-2.md"] {
+            let task =
+                std::fs::read_to_string(candidate.0.join("backlog/tasks").join(path)).unwrap();
+            assert!(task.contains("owner: keep") || path == "task-2.md");
+            assert!(task.contains("Task body.") || path == "task-2.md");
+            match handling {
+                "clear" => assert!(!task.contains("milestone:")),
+                "keep" => {
+                    let expected = if path == "task-1.md" {
+                        "Release A"
+                    } else {
+                        "m-0"
+                    };
+                    assert!(task.contains(&format!("milestone: {expected}")));
+                }
+                "reassign" => assert!(task.contains("milestone: m-1")),
+                _ => unreachable!(),
+            }
+        }
+        assert!(
+            candidate
+                .0
+                .join("backlog/archive/milestones/m-0 - release-a.md")
+                .exists()
+        );
+    }
+
+    let invalid_reference = Fixture::new();
+    let invalid_candidate = Fixture::new();
+    for fixture in [&invalid_reference, &invalid_candidate] {
+        fixture.file(
+            "backlog/milestones/m-0 - release-a.md",
+            "---\nid: m-0\ntitle: Release A\n---\n",
+        );
+        fixture.file(
+            "backlog/archive/milestones/m-1 - old.md",
+            "---\nid: m-1\ntitle: Old\n---\n",
+        );
+    }
+    for args in [
+        vec![
+            "milestone",
+            "remove",
+            "Release A",
+            "--task-handling",
+            "invalid",
+        ],
+        vec![
+            "milestone",
+            "remove",
+            "Release A",
+            "--task-handling",
+            "reassign",
+        ],
+        vec![
+            "milestone",
+            "remove",
+            "Release A",
+            "--task-handling",
+            "reassign",
+            "--reassign-to",
+            "m-1",
+        ],
+        vec![
+            "milestone",
+            "remove",
+            "Release A",
+            "--task-handling",
+            "reassign",
+            "--reassign-to",
+            "m-0",
+        ],
+    ] {
+        assert_cli_process_parity(&args, &invalid_reference, &invalid_candidate);
+        assert!(
+            invalid_candidate
+                .0
+                .join("backlog/milestones/m-0 - release-a.md")
+                .exists()
+        );
+    }
+}
+
+#[test]
 fn rust_decision_edit_matches_typescript_source_preservation_and_refusals() {
     let source = "---\nid: decision-1\ntitle: Alpha\ndate: 2026-01-01\nstatus: accepted\nsuperseded_by: decision-2\nowner: platform # keep\n---\n\n## Context\n\nOld context.\n\n## Decision\n\nOld choice.\n\n## Consequences\n\nKeep consequences.\n\n## Alternatives\n\nKeep alternatives.\n\n## Revisit trigger\n\nReview next release.\n";
     let setup = |fixture: &Fixture| {

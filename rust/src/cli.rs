@@ -107,6 +107,12 @@ enum MilestoneCommand {
     List(MilestoneListArgs),
     /// Add a milestone file.
     Add(MilestoneAddArgs),
+    /// Rename an active milestone and optionally update task references.
+    Rename(MilestoneRenameArgs),
+    /// Archive an active milestone.
+    Archive { name: String },
+    /// Remove an active milestone and handle task references.
+    Remove(MilestoneRemoveArgs),
 }
 
 #[derive(Debug, Args)]
@@ -131,6 +137,35 @@ struct MilestoneAddArgs {
     /// Set due date (YYYY-MM-DD).
     #[arg(long)]
     due_date: Option<String>,
+}
+
+#[derive(Debug, Args)]
+struct MilestoneRenameArgs {
+    /// Active milestone ID or title.
+    from: String,
+    /// New title.
+    to: String,
+    /// Do not update local task milestone references.
+    #[arg(long = "no-update-tasks", action = ArgAction::SetFalse, default_value_t = true)]
+    update_tasks: bool,
+    /// Set the milestone due date.
+    #[arg(long)]
+    due_date: Option<String>,
+    /// Clear the milestone due date.
+    #[arg(long)]
+    clear_due_date: bool,
+}
+
+#[derive(Debug, Args)]
+struct MilestoneRemoveArgs {
+    /// Active milestone ID or title.
+    name: String,
+    /// How to handle matching tasks.
+    #[arg(long, default_value = "clear")]
+    task_handling: String,
+    /// Active target milestone when task handling is reassign.
+    #[arg(long)]
+    reassign_to: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -859,14 +894,17 @@ pub fn run() -> Result<(), String> {
         Command::Milestone { command } => match command {
             Some(MilestoneCommand::List(options)) => run_milestone_list(options),
             Some(MilestoneCommand::Add(options)) => run_milestone_add(options),
+            Some(MilestoneCommand::Rename(options)) => run_milestone_rename(options),
+            Some(MilestoneCommand::Archive { name }) => run_milestone_archive(&name),
+            Some(MilestoneCommand::Remove(options)) => run_milestone_remove(options),
             None => {
                 let mut command = Cli::command();
-                command
-                    .find_subcommand_mut("milestone")
-                    .unwrap()
-                    .print_help()
+                let milestone = command.find_subcommand_mut("milestone").unwrap();
+                let mut help = Vec::new();
+                milestone
+                    .write_help(&mut help)
                     .map_err(|error| error.to_string())?;
-                write_stdout("\n")
+                Err(String::from_utf8_lossy(&help).trim_end().to_owned())
             }
         },
     }
@@ -3613,6 +3651,397 @@ fn run_milestone_add(options: MilestoneAddArgs) -> Result<(), String> {
         "Created milestone \"{}\" ({}).{due_date}\n",
         milestone.title, milestone.id
     ))
+}
+
+fn run_milestone_rename(options: MilestoneRenameArgs) -> Result<(), String> {
+    if options.due_date.is_some() && options.clear_due_date {
+        return Err("Cannot use --due-date and --clear-due-date together.".into());
+    }
+    let from = options.from.trim();
+    let to = options.to.trim();
+    if from.is_empty() || to.is_empty() {
+        return Err("Both 'from' and 'to' milestone names are required.".into());
+    }
+
+    let context = project_context()?;
+    let milestones = MilestoneStore::new(&context.root, &context.backlog_directory);
+    let source = milestones
+        .load_active(from)
+        .ok_or_else(|| format!("Milestone not found: \"{from}\""))?;
+    let requested_due_date = if options.clear_due_date {
+        None
+    } else if let Some(date) = options.due_date.as_deref() {
+        crate::milestone_store::normalize_due_date(Some(date)).map_err(|error| error.to_string())?
+    } else {
+        source.due_date.clone()
+    };
+    let title_changed = to != source.title.trim();
+    let due_date_changed = requested_due_date != source.due_date;
+    if !title_changed && !due_date_changed {
+        return write_stdout(&format!(
+            "Milestone \"{}\" ({}) is already named \"{}\". No changes made.\n",
+            source.title, source.id, source.title
+        ));
+    }
+
+    let active = milestones.list_active();
+    let active_refs = active.iter().collect::<Vec<_>>();
+    let requested_keys = milestone_create_keys(to, &active_refs);
+    let duplicate = active.iter().find(|candidate| {
+        !milestone_ids_equal(&candidate.id, &source.id)
+            && requested_keys
+                .iter()
+                .any(|key| milestone_create_record_keys(candidate).contains(key))
+    });
+    if let Some(duplicate) = duplicate {
+        return Err(format!(
+            "Milestone alias conflict: \"{to}\" matches existing milestone \"{}\" ({}).",
+            duplicate.title, duplicate.id
+        ));
+    }
+
+    let source_path = find_milestone_record_path(&context, &source.id)?;
+    let original_milestone = fs::read(&source_path).map_err(|error| error.to_string())?;
+    let task_store = TaskStore::new(&context.root, &context.backlog_directory, &context.prefix);
+    let archived = milestones.list_archived();
+    let all_milestones = active.iter().chain(&archived).collect::<Vec<_>>();
+    let title_collision = all_milestones.iter().any(|candidate| {
+        !milestone_ids_equal(&candidate.id, &source.id)
+            && milestone_create_record_keys(candidate).contains(&source.title.trim().to_lowercase())
+    });
+    let match_keys = milestone_task_match_keys(from, &source, !title_collision);
+    let matching_tasks = if title_changed && options.update_tasks {
+        task_store
+            .list_tasks()
+            .into_iter()
+            .filter(|entry| {
+                entry
+                    .task
+                    .milestone
+                    .as_deref()
+                    .is_some_and(|value| match_keys.contains(&value.trim().to_lowercase()))
+            })
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+
+    let due_date = if options.clear_due_date {
+        Some(None)
+    } else {
+        options.due_date.as_deref().map(Some)
+    };
+    let change = milestones
+        .rename(&source.id, to, due_date)
+        .map_err(|error| error.to_string())?;
+    if !change.success {
+        return Err(format!("Failed to rename milestone \"{}\".", source.title));
+    }
+    let renamed = change
+        .milestone
+        .ok_or_else(|| format!("Failed to rename milestone \"{}\".", source.title))?;
+    let renamed_path = change
+        .target_path
+        .clone()
+        .ok_or_else(|| format!("Failed to rename milestone \"{}\".", source.title))?;
+
+    let mut changed_tasks = Vec::new();
+    let mut updated_task_ids = Vec::new();
+    let mut updated_task_paths = Vec::new();
+    if title_changed && options.update_tasks {
+        for entry in matching_tasks {
+            let mut updated = entry.task.clone();
+            updated.milestone = Some(source.id.clone());
+            updated.updated_date = Some(crate::task_store::utc_timestamp());
+            match task_store.update_task(updated) {
+                Ok(Some(updated)) => {
+                    updated_task_ids.push(updated.task.id.to_uppercase());
+                    updated_task_paths.push(updated.path);
+                    changed_tasks.push(entry);
+                }
+                Ok(None) | Err(_) => {
+                    let rollback_failures = rollback_milestone_tasks(&task_store, &changed_tasks);
+                    let mut details = Vec::new();
+                    if !rollback_milestone_file(&source_path, &renamed_path, &original_milestone) {
+                        details.push("failed to rollback milestone file rename".to_owned());
+                    }
+                    if !rollback_failures.is_empty() {
+                        details.push(format!(
+                            "failed to rollback task milestones for: {}",
+                            rollback_failures.join(", ")
+                        ));
+                    }
+                    let suffix = if details.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" ({})", details.join("; "))
+                    };
+                    return Err(format!(
+                        "Failed to update task milestones after renaming \"{}\"{suffix}.",
+                        source.title
+                    ));
+                }
+            }
+        }
+    }
+    updated_task_ids.sort_by_key(|id| id.to_lowercase());
+    updated_task_paths.sort();
+    updated_task_paths.dedup();
+
+    if context.config.auto_commit == Some(true) && context.config.filesystem_only != Some(true) {
+        let mut selected_paths = vec![source_path.clone(), renamed_path.clone()];
+        selected_paths.extend(updated_task_paths.iter().cloned());
+        selected_paths.sort();
+        selected_paths.dedup();
+        let action = if title_changed { "Rename" } else { "Update" };
+        if let Err(error) = commit_record_change(
+            &context,
+            &format!("backlog: {action} milestone {}", source.id),
+            &selected_paths,
+        ) {
+            let rollback_failures = rollback_milestone_tasks(&task_store, &changed_tasks);
+            let mut details = Vec::new();
+            if !rollback_milestone_file(&source_path, &renamed_path, &original_milestone) {
+                details.push("failed to rollback milestone file rename".to_owned());
+            }
+            if !rollback_failures.is_empty() {
+                details.push(format!(
+                    "failed to rollback task milestones for: {}",
+                    rollback_failures.join(", ")
+                ));
+            }
+            let suffix = if details.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", details.join("; "))
+            };
+            return Err(format!(
+                "Failed while finalizing milestone rename \"{}\"{suffix}: {error}",
+                source.title
+            ));
+        }
+    }
+
+    let mut lines = Vec::new();
+    if title_changed {
+        lines.push(format!(
+            "Renamed milestone \"{}\" ({}) → \"{}\" ({}).",
+            source.title, source.id, renamed.title, renamed.id
+        ));
+    }
+    if due_date_changed {
+        lines.push(renamed.due_date.as_deref().map_or_else(
+            || "Cleared milestone due date.".to_owned(),
+            |date| format!("Due: {}", format_display_date(date, "")),
+        ));
+    }
+    if title_changed && options.update_tasks {
+        lines.push(format!(
+            "Updated {} local task{}: {}",
+            updated_task_ids.len(),
+            if updated_task_ids.len() == 1 { "" } else { "s" },
+            format_milestone_task_ids(&updated_task_ids)
+        ));
+    } else if title_changed {
+        lines.push("Skipped updating tasks (updateTasks=false).".into());
+    }
+    if source_path != renamed_path {
+        lines.push(format!(
+            "Renamed milestone file: {} -> {}",
+            source_path.display(),
+            renamed_path.display()
+        ));
+    }
+    write_stdout(&format!("{}\n", lines.join("\n")))
+}
+
+fn run_milestone_archive(name: &str) -> Result<(), String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("Milestone name cannot be empty.".into());
+    }
+    let context = project_context()?;
+    let store = MilestoneStore::new(&context.root, &context.backlog_directory);
+    let change = store.archive(name).map_err(|error| error.to_string())?;
+    if !change.success {
+        return Err(format!("Milestone not found: \"{name}\""));
+    }
+    if context.config.auto_commit == Some(true) && context.config.filesystem_only != Some(true) {
+        let source_path = change
+            .source_path
+            .as_ref()
+            .ok_or_else(|| format!("Milestone not found: \"{name}\""))?;
+        let target_path = change
+            .target_path
+            .as_ref()
+            .ok_or_else(|| format!("Milestone not found: \"{name}\""))?;
+        if let Err(error) = commit_record_change(
+            &context,
+            &format!(
+                "backlog: Archive milestone {}",
+                change.milestone.as_ref().unwrap().id
+            ),
+            &[source_path.clone(), target_path.clone()],
+        ) {
+            let _ = fs::rename(target_path, source_path);
+            return Err(error);
+        }
+    }
+    let milestone = change.milestone.unwrap();
+    write_stdout(&format!(
+        "Archived milestone \"{}\" ({}).\n",
+        milestone.title, milestone.id
+    ))
+}
+
+fn run_milestone_remove(options: MilestoneRemoveArgs) -> Result<(), String> {
+    let handling = match options.task_handling.trim().to_lowercase().as_str() {
+        "clear" => crate::milestone_service::TaskMilestoneHandling::Clear,
+        "keep" => crate::milestone_service::TaskMilestoneHandling::Keep,
+        "reassign" => crate::milestone_service::TaskMilestoneHandling::Reassign,
+        _ => {
+            return Err(format!(
+                "Invalid task handling: {}. Valid values are: clear, keep, reassign",
+                options.task_handling
+            ));
+        }
+    };
+    let context = project_context()?;
+    let milestones = MilestoneStore::new(&context.root, &context.backlog_directory);
+    let tasks = TaskStore::new(&context.root, &context.backlog_directory, &context.prefix);
+    let source = milestones
+        .load_active(&options.name)
+        .ok_or_else(|| format!("Milestone not found: \"{}\"", options.name.trim()))?;
+    let source_path = find_milestone_record_path(&context, &source.id)?;
+    let active_directory = context
+        .root
+        .join(&context.backlog_directory)
+        .join("milestones");
+    let relative_path = source_path
+        .strip_prefix(&active_directory)
+        .map_err(|error| error.to_string())?;
+    let archived_path = context
+        .root
+        .join(&context.backlog_directory)
+        .join("archive/milestones")
+        .join(relative_path);
+    let before_tasks = tasks.list_tasks();
+    let result = crate::milestone_service::remove_milestone(
+        &milestones,
+        &tasks,
+        &options.name,
+        handling,
+        options.reassign_to.as_deref(),
+    )?;
+
+    if context.config.auto_commit == Some(true) && context.config.filesystem_only != Some(true) {
+        let affected_ids: HashSet<_> = result
+            .affected_task_ids
+            .iter()
+            .map(|id| id.to_lowercase())
+            .collect();
+        let mut selected_paths = vec![source_path.clone(), archived_path.clone()];
+        selected_paths.extend(
+            before_tasks
+                .iter()
+                .filter(|entry| affected_ids.contains(&entry.task.id.to_lowercase()))
+                .map(|entry| entry.path.clone()),
+        );
+        selected_paths.sort();
+        selected_paths.dedup();
+        if let Err(error) = commit_record_change(
+            &context,
+            &format!("backlog: Remove milestone {}", result.milestone_id),
+            &selected_paths,
+        ) {
+            let mut rollback_details = Vec::new();
+            if fs::rename(&archived_path, &source_path).is_err() {
+                rollback_details.push("failed to rollback milestone archive".to_owned());
+            }
+            let affected: HashSet<_> = result
+                .affected_task_ids
+                .iter()
+                .map(|id| id.to_lowercase())
+                .collect();
+            let failed = rollback_milestone_tasks(
+                &tasks,
+                &before_tasks
+                    .iter()
+                    .filter(|entry| affected.contains(&entry.task.id.to_lowercase()))
+                    .cloned()
+                    .collect::<Vec<_>>(),
+            );
+            if !failed.is_empty() {
+                rollback_details.push(format!("failed rollback for: {}", failed.join(", ")));
+            }
+            let detail_suffix = if rollback_details.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", rollback_details.join("; "))
+            };
+            return Err(format!(
+                "Failed while finalizing milestone removal \"{}\"{detail_suffix}: {error}",
+                result.milestone_title
+            ));
+        }
+    }
+    write_stdout(&format!("{}\n", result.summary()))
+}
+
+fn milestone_task_match_keys(
+    name: &str,
+    milestone: &crate::records::MilestoneRecord,
+    include_title: bool,
+) -> HashSet<String> {
+    if include_title {
+        let records = [milestone];
+        let mut keys = milestone_create_keys(name, &records);
+        keys.extend(milestone_create_id_keys(&milestone.id));
+        keys
+    } else {
+        milestone_create_id_keys(&milestone.id)
+    }
+}
+
+fn milestone_ids_equal(left: &str, right: &str) -> bool {
+    !milestone_create_id_keys(left).is_disjoint(&milestone_create_id_keys(right))
+}
+
+fn format_milestone_task_ids(ids: &[String]) -> String {
+    let shown = ids.iter().take(20).cloned().collect::<Vec<_>>().join(", ");
+    if ids.len() > 20 {
+        format!("{shown} (and {} more)", ids.len() - 20)
+    } else {
+        shown
+    }
+}
+
+fn rollback_milestone_tasks(
+    tasks: &TaskStore,
+    changed: &[crate::task_store::TaskFileEntry],
+) -> Vec<String> {
+    let mut failed = Vec::new();
+    for entry in changed.iter().rev() {
+        if !matches!(tasks.update_task(entry.task.clone()), Ok(Some(_))) {
+            failed.push(entry.task.id.clone());
+        }
+    }
+    failed.sort();
+    failed
+}
+
+fn rollback_milestone_file(
+    source: &std::path::Path,
+    target: &std::path::Path,
+    original: &[u8],
+) -> bool {
+    if source == target {
+        return fs::write(source, original).is_ok();
+    }
+    if fs::rename(target, source).is_err() {
+        return false;
+    }
+    fs::write(source, original).is_ok()
 }
 
 fn milestone_create_keys(

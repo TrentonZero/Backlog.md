@@ -413,7 +413,7 @@ fn milestone_id_order(left: &str, right: &str) -> std::cmp::Ordering {
     }
 }
 
-fn normalize_due_date(value: Option<&str>) -> Result<Option<String>, String> {
+pub(crate) fn normalize_due_date(value: Option<&str>) -> Result<Option<String>, String> {
     let Some(value) = value else {
         return Ok(None);
     };
