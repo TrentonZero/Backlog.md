@@ -65,6 +65,23 @@ fn typescript_cli(args: &[&str], cwd: &std::path::Path) -> Output {
         .unwrap()
 }
 
+fn assert_cli_process_parity(
+    args: &[&str],
+    reference: &Fixture,
+    candidate: &Fixture,
+) -> (Output, Output) {
+    let expected = typescript_cli(args, &reference.0);
+    let actual = rust_cli(args, &candidate.0);
+    assert_eq!(
+        actual.status.code(),
+        expected.status.code(),
+        "args: {args:?}"
+    );
+    assert_eq!(actual.stdout, expected.stdout, "args: {args:?}");
+    assert_eq!(actual.stderr, expected.stderr, "args: {args:?}");
+    (expected, actual)
+}
+
 fn git(cwd: &std::path::Path, args: &[&str]) -> String {
     let output = Command::new("git")
         .args(args)
@@ -3192,6 +3209,341 @@ fn document_update_fixture() -> Fixture {
         "---\nid: doc-2\ntitle: Archived Guide\ntype: guide\ncreated_date: 2026-01-01\n---\nArchived body.\n",
     );
     fixture
+}
+
+const LIFECYCLE_DOCUMENT_PATH: &str = "backlog/docs/guides/doc-1 - Lifecycle-Guide.md";
+const ARCHIVED_LIFECYCLE_DOCUMENT_PATH: &str =
+    "backlog/archive/docs/guides/doc-1 - Lifecycle-Guide.md";
+const LIFECYCLE_DOCUMENT_SOURCE: &str = "---\nid: doc-1\ntitle: Lifecycle Guide\ntype: guide\ncreated_date: '2026-01-01'\ncustom: keep exactly\n---\nOriginal body\n";
+
+fn document_lifecycle_process_fixture() -> Fixture {
+    let fixture = fixture();
+    fixture.file(LIFECYCLE_DOCUMENT_PATH, LIFECYCLE_DOCUMENT_SOURCE);
+    fixture.file(
+        "backlog/tasks/task-1-first.md",
+        "---\nid: task-1\ntitle: First task\nstatus: To Do\npriority: high\ncreated_date: 2026-01-01\ndocumentation:\n  - backlog/docs/guides/doc-1 - Lifecycle-Guide.md\n  - ./backlog/docs/guides/doc-1 - Lifecycle-Guide.md\n  - backlog/docs/guides/doc-1 - Lifecycle-Guide.md#section\n  - backlog/archive/docs/guides/doc-1 - Lifecycle-Guide.md\n---\n",
+    );
+    fixture.file(
+        "backlog/archive/tasks/task-3-archived.md",
+        "---\nid: task-3\ntitle: Archived task\nstatus: Done\npriority: low\ncreated_date: 2026-01-03\ndocumentation:\n  - backlog/docs/guides/doc-1 - Lifecycle-Guide.md\n  - backlog/archive/docs/guides/doc-1 - Lifecycle-Guide.md#archived\n---\n",
+    );
+    fixture.file(
+        "backlog/drafts/draft-1 - Linked Draft.md",
+        "---\nid: DRAFT-1\ntitle: Linked Draft\nstatus: Draft\ncreated_date: 2026-01-04\ndocumentation:\n  - ./backlog/docs/guides/doc-1 - Lifecycle-Guide.md#heading\n  - backlog/archive/docs/guides/doc-1 - Lifecycle-Guide.md\n---\n",
+    );
+    fixture
+}
+
+#[test]
+fn rust_document_lifecycle_matches_typescript_state_changes_backlinks_and_id_release() {
+    let reference = document_lifecycle_process_fixture();
+    let candidate = document_lifecycle_process_fixture();
+    let references_before = [
+        "backlog/tasks/task-1-first.md",
+        "backlog/archive/tasks/task-3-archived.md",
+        "backlog/drafts/draft-1 - Linked Draft.md",
+    ]
+    .map(|path| std::fs::read_to_string(candidate.0.join(path)).unwrap());
+
+    for args in [
+        vec!["doc", "archive", "doc-001"],
+        vec!["doc", "archive", "1"],
+        vec!["doc", "restore", "DOC-001"],
+        vec!["doc", "restore", "doc-1"],
+        vec!["doc", "delete", "1"],
+        vec!["doc", "archive", "404"],
+        vec!["doc", "restore", "404"],
+        vec!["doc", "delete", "404"],
+        vec!["doc", "archive", "doc-1"],
+        vec!["doc", "delete", "DOC-001"],
+        vec!["doc", "delete", "1"],
+    ] {
+        let expected = typescript_cli(&args, &reference.0);
+        let actual = rust_cli(&args, &candidate.0);
+        assert_eq!(
+            actual.status.code(),
+            expected.status.code(),
+            "args: {args:?}"
+        );
+        assert_eq!(actual.stdout, expected.stdout, "args: {args:?}");
+        assert_eq!(actual.stderr, expected.stderr, "args: {args:?}");
+    }
+
+    assert!(!reference.0.join(LIFECYCLE_DOCUMENT_PATH).exists());
+    assert!(!candidate.0.join(LIFECYCLE_DOCUMENT_PATH).exists());
+    assert!(!reference.0.join(ARCHIVED_LIFECYCLE_DOCUMENT_PATH).exists());
+    assert!(!candidate.0.join(ARCHIVED_LIFECYCLE_DOCUMENT_PATH).exists());
+    for (index, path) in [
+        "backlog/tasks/task-1-first.md",
+        "backlog/archive/tasks/task-3-archived.md",
+        "backlog/drafts/draft-1 - Linked Draft.md",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert_eq!(
+            std::fs::read_to_string(candidate.0.join(path)).unwrap(),
+            references_before[index]
+        );
+    }
+    let recreated = typescript_cli(&["doc", "create", "Replacement"], &reference.0);
+    let actual_recreated = rust_cli(&["doc", "create", "Replacement"], &candidate.0);
+    assert_eq!(actual_recreated.status.code(), recreated.status.code());
+    assert_eq!(actual_recreated.stdout, recreated.stdout);
+    assert_eq!(actual_recreated.stderr, recreated.stderr);
+    assert!(String::from_utf8_lossy(&actual_recreated.stdout).contains("Created document doc-1"));
+}
+
+#[test]
+fn rust_document_lifecycle_matches_collisions_and_ambiguous_ids_without_writes() {
+    let reference = document_lifecycle_process_fixture();
+    let candidate = document_lifecycle_process_fixture();
+    for fixture in [&reference, &candidate] {
+        fixture.file(
+            ARCHIVED_LIFECYCLE_DOCUMENT_PATH,
+            "---\nid: doc-9\ntitle: Existing archive file\ntype: other\ncreated_date: 2026-01-01\n---\nKeep this file.\n",
+        );
+    }
+    let collision_before =
+        std::fs::read(reference.0.join(ARCHIVED_LIFECYCLE_DOCUMENT_PATH)).unwrap();
+    let active_before = std::fs::read(candidate.0.join(LIFECYCLE_DOCUMENT_PATH)).unwrap();
+    assert_cli_process_parity(&["doc", "archive", "doc-1"], &reference, &candidate);
+    assert_eq!(
+        std::fs::read(candidate.0.join(LIFECYCLE_DOCUMENT_PATH)).unwrap(),
+        active_before
+    );
+    assert_eq!(
+        std::fs::read(candidate.0.join(ARCHIVED_LIFECYCLE_DOCUMENT_PATH)).unwrap(),
+        collision_before
+    );
+
+    for fixture in [&reference, &candidate] {
+        std::fs::remove_file(fixture.0.join(ARCHIVED_LIFECYCLE_DOCUMENT_PATH)).unwrap();
+        std::fs::rename(
+            fixture.0.join(LIFECYCLE_DOCUMENT_PATH),
+            fixture.0.join(ARCHIVED_LIFECYCLE_DOCUMENT_PATH),
+        )
+        .unwrap();
+        fixture.file(
+            LIFECYCLE_DOCUMENT_PATH,
+            "---\nid: doc-9\ntitle: Existing active file\ntype: other\ncreated_date: 2026-01-01\n---\nKeep this file.\n",
+        );
+    }
+    let active_before = std::fs::read(candidate.0.join(LIFECYCLE_DOCUMENT_PATH)).unwrap();
+    let archived_before =
+        std::fs::read(candidate.0.join(ARCHIVED_LIFECYCLE_DOCUMENT_PATH)).unwrap();
+    assert_cli_process_parity(&["doc", "restore", "doc-1"], &reference, &candidate);
+    assert_eq!(
+        std::fs::read(candidate.0.join(LIFECYCLE_DOCUMENT_PATH)).unwrap(),
+        active_before
+    );
+    assert_eq!(
+        std::fs::read(candidate.0.join(ARCHIVED_LIFECYCLE_DOCUMENT_PATH)).unwrap(),
+        archived_before
+    );
+
+    for fixture in [&reference, &candidate] {
+        fixture.file(LIFECYCLE_DOCUMENT_PATH, LIFECYCLE_DOCUMENT_SOURCE);
+    }
+    let active_before = std::fs::read(candidate.0.join(LIFECYCLE_DOCUMENT_PATH)).unwrap();
+    let archived_before =
+        std::fs::read(candidate.0.join(ARCHIVED_LIFECYCLE_DOCUMENT_PATH)).unwrap();
+    assert_cli_process_parity(&["doc", "archive", "1"], &reference, &candidate);
+    assert_eq!(
+        std::fs::read(candidate.0.join(LIFECYCLE_DOCUMENT_PATH)).unwrap(),
+        active_before
+    );
+    assert_eq!(
+        std::fs::read(candidate.0.join(ARCHIVED_LIFECYCLE_DOCUMENT_PATH)).unwrap(),
+        archived_before
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn rust_document_lifecycle_moves_and_deletes_symlinks_without_changing_targets() {
+    use std::os::unix::fs::symlink;
+
+    let reference = document_lifecycle_process_fixture();
+    let candidate = document_lifecycle_process_fixture();
+    for fixture in [&reference, &candidate] {
+        let target = fixture.0.join("outside/lifecycle.md");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::rename(fixture.0.join(LIFECYCLE_DOCUMENT_PATH), &target).unwrap();
+        symlink(
+            "../../../outside/lifecycle.md",
+            fixture.0.join(LIFECYCLE_DOCUMENT_PATH),
+        )
+        .unwrap();
+    }
+    for (args, old_path, new_path) in [
+        (
+            &["doc", "archive", "doc-1"][..],
+            LIFECYCLE_DOCUMENT_PATH,
+            ARCHIVED_LIFECYCLE_DOCUMENT_PATH,
+        ),
+        (
+            &["doc", "restore", "1"][..],
+            ARCHIVED_LIFECYCLE_DOCUMENT_PATH,
+            LIFECYCLE_DOCUMENT_PATH,
+        ),
+        (
+            &["doc", "archive", "1"][..],
+            LIFECYCLE_DOCUMENT_PATH,
+            ARCHIVED_LIFECYCLE_DOCUMENT_PATH,
+        ),
+    ] {
+        assert_cli_process_parity(args, &reference, &candidate);
+        for fixture in [&reference, &candidate] {
+            assert!(!fixture.0.join(old_path).exists());
+            assert!(
+                std::fs::symlink_metadata(fixture.0.join(new_path))
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+            );
+            assert_eq!(
+                std::fs::canonicalize(fixture.0.join(new_path)).unwrap(),
+                std::fs::canonicalize(fixture.0.join("outside/lifecycle.md")).unwrap()
+            );
+        }
+    }
+    assert_cli_process_parity(&["doc", "delete", "doc-1"], &reference, &candidate);
+    for fixture in [&reference, &candidate] {
+        assert!(!fixture.0.join(ARCHIVED_LIFECYCLE_DOCUMENT_PATH).exists());
+        assert_eq!(
+            std::fs::read(fixture.0.join("outside/lifecycle.md")).unwrap(),
+            LIFECYCLE_DOCUMENT_SOURCE.as_bytes()
+        );
+    }
+}
+
+#[test]
+fn rust_document_lifecycle_auto_commit_matches_typescript_selected_paths() {
+    let reference = document_lifecycle_process_fixture();
+    let candidate = document_lifecycle_process_fixture();
+    for fixture in [&reference, &candidate] {
+        let configured = typescript_cli(&["config", "set", "autoCommit", "true"], &fixture.0);
+        assert!(
+            configured.status.success(),
+            "{}",
+            String::from_utf8_lossy(&configured.stderr)
+        );
+        initialize_git_fixture(fixture);
+        fixture.file("STAGED.txt", "staged by the user\n");
+        git(&fixture.0, &["add", "STAGED.txt"]);
+        fixture.file("UNTRACKED.txt", "untracked user work\n");
+    }
+
+    for (args, message) in [
+        (
+            &["doc", "archive", "1"][..],
+            "backlog: Archive document doc-1",
+        ),
+        (
+            &["doc", "restore", "doc-1"][..],
+            "backlog: Restore document doc-1",
+        ),
+        (
+            &["doc", "archive", "doc-1"][..],
+            "backlog: Archive document doc-1",
+        ),
+        (
+            &["doc", "delete", "1"][..],
+            "backlog: Delete document doc-1",
+        ),
+    ] {
+        assert_cli_process_parity(args, &reference, &candidate);
+        let expected_commit = selected_commit_result(&reference);
+        let actual_commit = selected_commit_result(&candidate);
+        assert_eq!(actual_commit, expected_commit, "args: {args:?}");
+        assert_eq!(actual_commit.0, message, "args: {args:?}");
+        assert_eq!(actual_commit.2, "STAGED.txt\nUNRELATED.txt");
+        assert_eq!(
+            git(&candidate.0, &["status", "--porcelain"]),
+            git(&reference.0, &["status", "--porcelain"])
+        );
+    }
+}
+
+#[test]
+fn rust_document_lifecycle_preserves_applied_change_when_commit_fails() {
+    for (args, initial_archived, expected_path) in [
+        (
+            &["doc", "archive", "doc-1"][..],
+            false,
+            ARCHIVED_LIFECYCLE_DOCUMENT_PATH,
+        ),
+        (
+            &["doc", "restore", "doc-1"][..],
+            true,
+            LIFECYCLE_DOCUMENT_PATH,
+        ),
+        (&["doc", "delete", "doc-1"][..], true, ""),
+    ] {
+        let reference = document_lifecycle_process_fixture();
+        let candidate = document_lifecycle_process_fixture();
+        for fixture in [&reference, &candidate] {
+            let configured = typescript_cli(&["config", "set", "autoCommit", "true"], &fixture.0);
+            assert!(
+                configured.status.success(),
+                "{}",
+                String::from_utf8_lossy(&configured.stderr)
+            );
+            if initial_archived {
+                std::fs::create_dir_all(
+                    fixture
+                        .0
+                        .join(ARCHIVED_LIFECYCLE_DOCUMENT_PATH)
+                        .parent()
+                        .unwrap(),
+                )
+                .unwrap();
+                std::fs::rename(
+                    fixture.0.join(LIFECYCLE_DOCUMENT_PATH),
+                    fixture.0.join(ARCHIVED_LIFECYCLE_DOCUMENT_PATH),
+                )
+                .unwrap();
+            }
+            initialize_git_fixture(fixture);
+            std::fs::write(fixture.0.join(".git/index.lock"), "").unwrap();
+        }
+        let expected = typescript_cli(args, &reference.0);
+        let actual = rust_cli(args, &candidate.0);
+        assert_eq!(
+            actual.status.code(),
+            expected.status.code(),
+            "args: {args:?}"
+        );
+        assert_eq!(actual.stdout, expected.stdout, "args: {args:?}");
+        assert!(
+            String::from_utf8_lossy(&expected.stderr).contains("committing the change failed"),
+            "{}",
+            String::from_utf8_lossy(&expected.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&actual.stderr)
+                .replace(&candidate.0.to_string_lossy().to_string(), "<ROOT>"),
+            String::from_utf8_lossy(&expected.stderr)
+                .replace(&reference.0.to_string_lossy().to_string(), "<ROOT>"),
+            "args: {args:?}"
+        );
+        let path = if expected_path.is_empty() {
+            None
+        } else {
+            Some(expected_path)
+        };
+        for fixture in [&reference, &candidate] {
+            match path {
+                Some(path) => assert_eq!(
+                    std::fs::read(fixture.0.join(path)).unwrap(),
+                    LIFECYCLE_DOCUMENT_SOURCE.as_bytes(),
+                    "args: {args:?}"
+                ),
+                None => assert!(!fixture.0.join(ARCHIVED_LIFECYCLE_DOCUMENT_PATH).exists()),
+            }
+        }
+    }
 }
 
 #[test]

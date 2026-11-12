@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@codex'
 created_date: '2026-11-07T21:53:00Z'
-updated_date: '2026-11-12T15:58:00Z'
+updated_date: '2026-11-12T16:14:00Z'
 labels: []
 dependencies:
   - BACK-801
@@ -149,4 +149,6 @@ BACK-802.54 completed and pushed as 8b02ebe9: Rust `doc list --plain` now matche
 BACK-802.56 completed: Rust `doc create` now matches title/type/path validation, default values, output and Markdown; explicit empty `--type` defaults to other. Full Cargo, rustfmt, Clippy, Biome, scoped Bun doc CLI tests (20), and isolated process parity passed; cold and full-context review findings were resolved. BACK-802.57 document update is active. The remaining canonical CLI tasks are tracked through BACK-802.71 (documents, decisions, milestones, search, config/agents, init, doctor/cleanup, workflow instructions/completion, batch edit/watch, overview/board export). BACK-802.72–.75 cover Rust HTTP/WebSocket with retained React, MCP, TUI, and platform distribution/cutover.
 
 BACK-802.57 completed: Rust `doc update` now supports title/content/type/tags/path, preserves omitted fields and unmanaged Markdown, and matches TypeScript refusal, tag-deduplication, and auto-commit failure behavior. Full Cargo (70 CLI integration tests and all Rust suites), 61 scoped Bun document tests / 355 assertions, rustfmt, Clippy, Biome, and diff checks passed. Cold and full-context review findings were resolved. BACK-802.58 document lifecycle CLI commands are active; subsequent decision, milestone, search/config/init/doctor, workflow, browser, MCP, TUI and distribution tasks are tracked through .75.
+
+BACK-802.58 completed: Rust document archive/restore/delete now matches TypeScript for aliases, state/collision/ambiguity errors, backlinks, byte-preserving moves, symlinks, ID release and selected-path Git behavior. Full Cargo suite, scoped Bun docs suites (100 tests / 638 assertions), rustfmt, Clippy, Biome and diff checks passed; independent reviews found no blockers. BACK-802.59 decision list/view is active; .60-.75 continue decision writes, milestones, search/config/init/doctor, workflow CLI, browser, MCP, TUI and distribution/cutover.
 <!-- SECTION:NOTES:END -->

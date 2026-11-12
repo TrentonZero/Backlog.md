@@ -80,6 +80,12 @@ enum DocCommand {
         #[command(flatten)]
         options: DocumentViewArgs,
     },
+    /// Move a document into the archive.
+    Archive { document_id: String },
+    /// Restore an archived document.
+    Restore { document_id: String },
+    /// Permanently delete an archived document.
+    Delete { document_id: String },
 }
 
 #[derive(Debug, Args)]
@@ -673,7 +679,23 @@ pub fn run() -> Result<(), String> {
                     options,
                 },
         } => run_document_view(&document_id, options),
+        Command::Doc {
+            command: DocCommand::Archive { document_id },
+        } => run_document_lifecycle(&document_id, DocumentLifecycleOperation::Archive),
+        Command::Doc {
+            command: DocCommand::Restore { document_id },
+        } => run_document_lifecycle(&document_id, DocumentLifecycleOperation::Restore),
+        Command::Doc {
+            command: DocCommand::Delete { document_id },
+        } => run_document_lifecycle(&document_id, DocumentLifecycleOperation::Delete),
     }
+}
+
+#[derive(Clone, Copy)]
+enum DocumentLifecycleOperation {
+    Archive,
+    Restore,
+    Delete,
 }
 
 fn project_context() -> Result<ProjectContext, String> {
@@ -2612,6 +2634,109 @@ fn document_update_commit_error(
         .collect::<Vec<_>>()
         .join("/");
     format!("Git command failed (exit code {exit_code}): git add {relative_path}\n{stderr}\n")
+}
+
+fn document_lifecycle_stage_error(
+    error: String,
+    project_root: &std::path::Path,
+    path: &std::path::Path,
+) -> String {
+    let Some((_, stage_error)) = error.split_once("Git stage selected files failed (exit code ")
+    else {
+        return error;
+    };
+    let Some((exit_code, command_and_stderr)) =
+        stage_error.split_once("). Command: git --literal-pathspecs add -A -- ")
+    else {
+        return error;
+    };
+    let Some((_, stderr)) = command_and_stderr.split_once('\n') else {
+        return error;
+    };
+    let Some(relative_path) = path.strip_prefix(project_root).ok() else {
+        return error;
+    };
+    let relative_path = relative_path
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/");
+    format!("Git command failed (exit code {exit_code}): git add {relative_path}\n{stderr}\n")
+}
+
+fn run_document_lifecycle(
+    document_id: &str,
+    operation: DocumentLifecycleOperation,
+) -> Result<(), String> {
+    let context = project_context()?;
+    let store = DocumentStore::new(&context.root, &context.backlog_directory, &context.prefix);
+    let before = store
+        .load_document_for_view(document_id)
+        .map_err(|error| error.to_string())?;
+    let change = match operation {
+        DocumentLifecycleOperation::Archive => store.archive_document(document_id),
+        DocumentLifecycleOperation::Restore => store.restore_document(document_id),
+        DocumentLifecycleOperation::Delete => store.delete_document(document_id),
+    }
+    .map_err(|error| error.to_string())?
+    .ok_or_else(|| format!("Document not found: {document_id}"))?;
+
+    if context.config.auto_commit == Some(true) && context.config.filesystem_only != Some(true) {
+        let before = before.ok_or_else(|| format!("Document not found: {document_id}"))?;
+        let mut paths = vec![before.path.clone()];
+        match operation {
+            DocumentLifecycleOperation::Archive | DocumentLifecycleOperation::Restore => {
+                let after = store
+                    .load_document_for_view(&change.id)
+                    .map_err(|error| error.to_string())?
+                    .ok_or_else(|| format!("Document not found: {}", change.id))?;
+                paths.push(after.path);
+            }
+            DocumentLifecycleOperation::Delete => {
+                let archive_directory = context
+                    .root
+                    .join(&context.backlog_directory)
+                    .join("archive/docs");
+                let docs_directory = context.root.join(&context.backlog_directory).join("docs");
+                let relative = before
+                    .path
+                    .strip_prefix(&archive_directory)
+                    .map_err(|error| error.to_string())?;
+                paths.push(docs_directory.join(relative));
+            }
+        }
+        let (verb, commit_verb, stage_path) = match operation {
+            DocumentLifecycleOperation::Archive => ("archived", "Archive", paths.last().unwrap()),
+            DocumentLifecycleOperation::Restore => ("restored", "Restore", paths.last().unwrap()),
+            DocumentLifecycleOperation::Delete => ("deleted", "Delete", paths.first().unwrap()),
+        };
+        commit_record_change(
+            &context,
+            &format!("backlog: {commit_verb} document {}", change.id),
+            &paths,
+        )
+        .map_err(|error| {
+            let error = document_lifecycle_stage_error(error, &context.root, stage_path);
+            format!(
+                "Document {} was {verb}, but committing the change failed: {error}",
+                change.id
+            )
+        })?;
+    }
+
+    let confirmation = match operation {
+        DocumentLifecycleOperation::Archive => "Archived",
+        DocumentLifecycleOperation::Restore => "Restored",
+        DocumentLifecycleOperation::Delete => "Deleted",
+    };
+    write_stdout(&format!("{confirmation} document {}\n", change.id))?;
+    if !change.listed_as_documentation_by.is_empty() {
+        write_stdout(&format!(
+            "Still listed as documentation by: {}\n",
+            change.listed_as_documentation_by.join(", ")
+        ))?;
+    }
+    Ok(())
 }
 
 fn run_draft_view(task_id: &str, options: DraftViewArgs) -> Result<(), String> {

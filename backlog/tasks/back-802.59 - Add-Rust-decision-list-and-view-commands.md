@@ -1,10 +1,11 @@
 ---
 id: BACK-802.59
 title: Add Rust decision list and view commands
-status: To Do
+status: In Progress
 assignee:
   - '@codex'
 created_date: '2026-11-12T15:16:00Z'
+updated_date: '2026-11-12T16:13:00Z'
 labels: []
 dependencies:
   - BACK-802.58
@@ -43,3 +44,9 @@ The native executable can already read decision records, but users still need th
 - [ ] #2 bun run check . passes when formatting/linting touched
 - [ ] #3 bun test (or scoped test) passes
 <!-- DOD:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+Compare decision list/view output, JSON envelopes, formatting, shared window flags, archived lookup, identity errors and output-mode conflicts against TypeScript and DecisionStore. Add process parity for active/archived, empty, paging/count, JSON and refusals. Run full Rust and scoped Bun checks, review, finalize, then continue to decision create/edit.
+<!-- SECTION:PLAN:END -->
