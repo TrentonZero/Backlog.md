@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@codex'
 created_date: '2026-11-07T21:53:00Z'
-updated_date: '2026-11-12T02:40:00Z'
+updated_date: '2026-11-12T02:52:00Z'
 labels: []
 dependencies:
   - BACK-801
@@ -133,4 +133,6 @@ BACK-802.44 completed: added Rust task edit for core fields, labels, aliases, cl
 BACK-802.45 completed: added Rust task archive, restore, and delete commands with TypeScript-compatible help/output, locked TaskStore mutations, byte-preserving moves, subtask refusals, and task/draft link cleanup. Full Rust suite, focused TypeScript lifecycle tests (47), rustfmt, Clippy, build, Biome, and diff checks passed; required reviews cleared. Groma remains unavailable (command not found).
 
 BACK-802.46 completed: extended Rust task edit with dependency aliases, reference and documentation replacement/add/remove/clear options, shared validation, locked writes, and source preservation. Full Rust tests, focused TypeScript suites (75 tests), rustfmt, Clippy, build, Biome, and diff checks passed; both reviews found no blockers. Groma remains unavailable (command not found).
+
+Completed BACK-802.47: Rust task edit now supports Acceptance Criteria replacement, add, clear, indexed check/uncheck/remove, and Definition of Done add/check/uncheck/remove. Verified Rust-vs-TypeScript process parity, checked-state retention, malformed/no-op refusal, and source preservation. Full Rust suite, 49 focused Bun tests, Biome, rustfmt, Clippy, and build passed. Cold and full-context complexity reviews cleared the change. Groma agent instructions were unavailable in this environment.
 <!-- SECTION:NOTES:END -->

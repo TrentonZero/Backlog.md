@@ -797,6 +797,16 @@ fn rust_task_edit_help_documents_supported_core_fields() {
         "--add-doc",
         "--remove-doc",
         "--clear-docs",
+        "--acceptance-criteria",
+        "--ac",
+        "--clear-ac",
+        "--remove-ac",
+        "--check-ac",
+        "--uncheck-ac",
+        "--dod",
+        "--remove-dod",
+        "--check-dod",
+        "--uncheck-dod",
         "--plain",
     ] {
         assert!(
@@ -804,6 +814,116 @@ fn rust_task_edit_help_documents_supported_core_fields() {
             "missing {option} from task edit help"
         );
     }
+}
+
+#[test]
+fn rust_task_edit_checklists_match_live_typescript_and_preserve_checked_items() {
+    let args = [
+        "task",
+        "edit",
+        "task-1",
+        "--acceptance-criteria",
+        "Keep, comma",
+        "--acceptance-criteria",
+        "New item",
+        "--dod",
+        "Ship it",
+        "--check-dod",
+        "2",
+    ];
+    let ts_fixture = fixture();
+    ts_fixture.file("backlog/tasks/task-1-first.md", "---\nid: task-1\ntitle: First task\nstatus: To Do\npriority: high\ncreated_date: 2026-01-01\n---\n\n## Acceptance Criteria\n<!-- AC:BEGIN -->\n- [x] #1 Keep, comma\n- [ ] #2 Remove me\n<!-- AC:END -->\n\n## Definition of Done\n<!-- DOD:BEGIN -->\n- [ ] #1 Check me\n<!-- DOD:END -->\n");
+    let original = ts_fixture.0.join("backlog/tasks/task-1-first.md");
+    let expected = typescript_cli(&args, &ts_fixture.0);
+    let expected_source = std::fs::read(&original).unwrap();
+    let rust_fixture = fixture();
+    rust_fixture.file("backlog/tasks/task-1-first.md", "---\nid: task-1\ntitle: First task\nstatus: To Do\npriority: high\ncreated_date: 2026-01-01\n---\n\n## Acceptance Criteria\n<!-- AC:BEGIN -->\n- [x] #1 Keep, comma\n- [ ] #2 Remove me\n<!-- AC:END -->\n\n## Definition of Done\n<!-- DOD:BEGIN -->\n- [ ] #1 Check me\n<!-- DOD:END -->\n");
+    let actual = rust_cli(&args, &rust_fixture.0);
+    assert_eq!(actual.status.code(), expected.status.code());
+    assert_eq!(actual.stderr, expected.stderr);
+    assert_eq!(actual.stdout, expected.stdout);
+    let actual_source =
+        std::fs::read_to_string(rust_fixture.0.join("backlog/tasks/task-1-first.md")).unwrap();
+    let expected_source = String::from_utf8(expected_source).unwrap();
+    assert_eq!(
+        actual_source.splitn(3, "---").nth(2).unwrap().trim_end(),
+        expected_source.splitn(3, "---").nth(2).unwrap().trim_end()
+    );
+}
+
+#[test]
+fn rust_task_edit_checklist_refusals_match_live_typescript_without_writes() {
+    for args in [
+        vec!["task", "edit", "task-1", "--clear-ac", "--ac", "Extra"],
+        vec!["task", "edit", "task-1", "--check-ac", "0"],
+    ] {
+        let ts_fixture = fixture();
+        ts_fixture.file("backlog/tasks/task-1-first.md", "---\nid: task-1\ntitle: First task\nstatus: To Do\npriority: high\ncreated_date: 2026-01-01\n---\n\n## Acceptance Criteria\n<!-- AC:BEGIN -->\n- [ ] #1 Existing\n<!-- AC:END -->\n");
+        let original = std::fs::read(ts_fixture.0.join("backlog/tasks/task-1-first.md")).unwrap();
+        let expected = typescript_cli(&args, &ts_fixture.0);
+        assert!(!expected.status.success());
+        assert_eq!(
+            std::fs::read(ts_fixture.0.join("backlog/tasks/task-1-first.md")).unwrap(),
+            original
+        );
+
+        let rust_fixture = fixture();
+        rust_fixture.file("backlog/tasks/task-1-first.md", "---\nid: task-1\ntitle: First task\nstatus: To Do\npriority: high\ncreated_date: 2026-01-01\n---\n\n## Acceptance Criteria\n<!-- AC:BEGIN -->\n- [ ] #1 Existing\n<!-- AC:END -->\n");
+        let original = std::fs::read(rust_fixture.0.join("backlog/tasks/task-1-first.md")).unwrap();
+        let actual = rust_cli(&args, &rust_fixture.0);
+        assert_eq!(
+            actual.status.code(),
+            expected.status.code(),
+            "args: {args:?}"
+        );
+        assert_eq!(actual.stdout, expected.stdout, "args: {args:?}");
+        assert_eq!(actual.stderr, expected.stderr, "args: {args:?}");
+        assert_eq!(
+            std::fs::read(rust_fixture.0.join("backlog/tasks/task-1-first.md")).unwrap(),
+            original
+        );
+    }
+}
+
+#[test]
+fn rust_task_edit_malformed_checklists_refuse_indexed_edits_without_writes() {
+    let args = ["task", "edit", "task-1", "--check-ac", "1"];
+    let contents = "---\nid: task-1\ntitle: First task\nstatus: To Do\npriority: high\ncreated_date: 2026-01-01\n---\n\n## Acceptance Criteria\n<!-- AC:BEGIN -->\n- [?] Broken mark\n<!-- AC:END -->\n";
+    let ts_fixture = fixture();
+    ts_fixture.file("backlog/tasks/task-1-first.md", contents);
+    let expected = typescript_cli(&args, &ts_fixture.0);
+    let ts_path = ts_fixture.0.join("backlog/tasks/task-1-first.md");
+    let original = std::fs::read(&ts_path).unwrap();
+    let rust_fixture = fixture();
+    rust_fixture.file("backlog/tasks/task-1-first.md", contents);
+    let actual = rust_cli(&args, &rust_fixture.0);
+    assert!(!actual.status.success());
+    assert_eq!(actual.status.code(), expected.status.code());
+    assert_eq!(actual.stderr, expected.stderr);
+    assert_eq!(
+        std::fs::read(rust_fixture.0.join("backlog/tasks/task-1-first.md")).unwrap(),
+        original
+    );
+}
+
+#[test]
+fn rust_task_edit_noop_indexed_checklist_refuses_malformed_marks() {
+    let args = ["task", "edit", "task-1", "--uncheck-ac", "2"];
+    let contents = "---\nid: task-1\ntitle: First task\nstatus: To Do\npriority: high\ncreated_date: 2026-01-01\n---\n\n## Acceptance Criteria\n<!-- AC:BEGIN -->\n- [x] #1 Checked\n- [ ] #2 Already unchecked\n- [?] #3 Invalid\n<!-- AC:END -->\n";
+    let ts_fixture = fixture();
+    ts_fixture.file("backlog/tasks/task-1-first.md", contents);
+    let expected = typescript_cli(&args, &ts_fixture.0);
+    let rust_fixture = fixture();
+    rust_fixture.file("backlog/tasks/task-1-first.md", contents);
+    let actual = rust_cli(&args, &rust_fixture.0);
+    assert!(!actual.status.success());
+    assert_eq!(actual.status.code(), expected.status.code());
+    assert_eq!(actual.stderr, expected.stderr);
+    assert_eq!(actual.stdout, expected.stdout);
+    assert_eq!(
+        std::fs::read(rust_fixture.0.join("backlog/tasks/task-1-first.md")).unwrap(),
+        contents.as_bytes()
+    );
 }
 
 #[test]

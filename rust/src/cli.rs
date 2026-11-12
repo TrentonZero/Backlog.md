@@ -7,7 +7,7 @@ use crate::{
     identity::{canonical_task_id, task_ids_equal},
     milestone_store::MilestoneStore,
     records::TaskRecord,
-    sections::Criterion,
+    sections::{ChecklistKind, Criterion},
     task_detail::{TaskDetail, build_task_detail},
     task_filtering::{LabelMatch, TaskFilter},
     task_list::{TaskListItem, with_readiness},
@@ -137,7 +137,7 @@ struct TaskCreateArgs {
     plain: bool,
 }
 
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 struct TaskEditArgs {
     /// Task ID to edit.
     task_id: String,
@@ -219,6 +219,36 @@ struct TaskEditArgs {
     /// Clear all documentation.
     #[arg(long)]
     clear_docs: bool,
+    /// Add an acceptance criterion; repeat for multiple criteria.
+    #[arg(long = "ac", action = ArgAction::Append)]
+    add_ac: Vec<String>,
+    /// Replace all acceptance criteria; repeat for multiple criteria.
+    #[arg(long = "acceptance-criteria", action = ArgAction::Append)]
+    acceptance_criteria: Option<Vec<String>>,
+    /// Clear all acceptance criteria.
+    #[arg(long)]
+    clear_ac: bool,
+    /// Remove acceptance criteria by 1-based index.
+    #[arg(long = "remove-ac", action = ArgAction::Append)]
+    remove_ac: Vec<String>,
+    /// Check acceptance criteria by 1-based index.
+    #[arg(long = "check-ac", action = ArgAction::Append)]
+    check_ac: Vec<String>,
+    /// Uncheck acceptance criteria by 1-based index.
+    #[arg(long = "uncheck-ac", action = ArgAction::Append)]
+    uncheck_ac: Vec<String>,
+    /// Add a Definition of Done item; repeat for multiple items.
+    #[arg(long = "dod", action = ArgAction::Append)]
+    add_dod: Vec<String>,
+    /// Remove Definition of Done items by 1-based index.
+    #[arg(long = "remove-dod", action = ArgAction::Append)]
+    remove_dod: Vec<String>,
+    /// Check Definition of Done items by 1-based index.
+    #[arg(long = "check-dod", action = ArgAction::Append)]
+    check_dod: Vec<String>,
+    /// Uncheck Definition of Done items by 1-based index.
+    #[arg(long = "uncheck-dod", action = ArgAction::Append)]
+    uncheck_dod: Vec<String>,
     /// Print full task detail after editing.
     #[arg(long)]
     plain: bool,
@@ -657,6 +687,7 @@ fn run_task_create(options: TaskCreateArgs) -> Result<(), String> {
 }
 
 fn run_task_edit(options: TaskEditArgs) -> Result<(), String> {
+    let checklist_options = options.clone();
     let context = project_context()?;
     validate_task_edit_list_options(&options)?;
     if options.clear_due_date && options.due_date.is_some() {
@@ -876,6 +907,7 @@ fn run_task_edit(options: TaskEditArgs) -> Result<(), String> {
             .documentation
             .retain(|document| !removals.contains(document));
     }
+    apply_checklist_options(&mut updated, &entry.task.raw_content, &checklist_options)?;
 
     let updated_entry = if updated != entry.task {
         updated.updated_date = Some(crate::task_store::utc_timestamp());
@@ -943,6 +975,23 @@ fn validate_task_edit_list_options(options: &TaskEditArgs) -> Result<(), String>
             .all(|value| value.split(',').all(|item| item.trim().is_empty()))
     };
     let has_nonblank = |values: &[String]| !values.is_empty() && !values_are_blank(values);
+    if options.clear_ac
+        && (options.acceptance_criteria.is_some()
+            || !options.add_ac.is_empty()
+            || !options.remove_ac.is_empty()
+            || !options.check_ac.is_empty()
+            || !options.uncheck_ac.is_empty())
+    {
+        return Err("Cannot combine --clear-ac with --acceptance-criteria, --ac, --remove-ac, --check-ac, or --uncheck-ac. Use --clear-ac by itself.\nNo changes were applied.".into());
+    }
+    if options.acceptance_criteria.is_some()
+        && (!options.add_ac.is_empty()
+            || !options.remove_ac.is_empty()
+            || !options.check_ac.is_empty()
+            || !options.uncheck_ac.is_empty())
+    {
+        return Err("Cannot combine --acceptance-criteria with --ac, --remove-ac, --check-ac, or --uncheck-ac. Use replacement by itself, or use only incremental operations.\nNo changes were applied.".into());
+    }
     if options.clear_deps && options.dependencies.as_deref().is_some_and(has_nonblank) {
         return Err("Cannot combine --clear-deps with --depends-on or --dep. Use --clear-deps by itself.\nNo changes were applied.".into());
     }
@@ -1008,6 +1057,186 @@ fn validate_task_edit_list_options(options: &TaskEditArgs) -> Result<(), String>
                 "Cannot use an empty value with {flag}. Use {clear_flag} to remove all {subject}.\nNo changes were applied."
             ));
         }
+    }
+    Ok(())
+}
+
+fn checklist_indices(values: &[String], task_id: &str) -> Result<Vec<usize>, String> {
+    values
+        .iter()
+        .map(|value| {
+            let index = value.parse::<usize>().ok().filter(|index| *index > 0);
+            index.ok_or_else(|| {
+                format!(
+                    "Invalid index: {value}. Index must be a positive number (1-based). Try 'backlog task edit {task_id} --help' for index options.\nNo changes were applied."
+                )
+            })
+        })
+        .collect()
+}
+
+fn apply_checklist_options(
+    task: &mut TaskRecord,
+    original_body: &str,
+    options: &TaskEditArgs,
+) -> Result<(), String> {
+    let ac_touched = options.acceptance_criteria.is_some()
+        || options.clear_ac
+        || !options.add_ac.is_empty()
+        || !options.remove_ac.is_empty()
+        || !options.check_ac.is_empty()
+        || !options.uncheck_ac.is_empty();
+    let dod_touched = !options.add_dod.is_empty()
+        || !options.remove_dod.is_empty()
+        || !options.check_dod.is_empty()
+        || !options.uncheck_dod.is_empty();
+    if !options.remove_ac.is_empty()
+        || !options.check_ac.is_empty()
+        || !options.uncheck_ac.is_empty()
+    {
+        crate::sections::assert_valid_checklist_marks(
+            original_body,
+            ChecklistKind::AcceptanceCriteria,
+        )
+        .map_err(|error| format!("{error}\nNo changes were applied."))?;
+    }
+    if !options.remove_dod.is_empty()
+        || !options.check_dod.is_empty()
+        || !options.uncheck_dod.is_empty()
+    {
+        crate::sections::assert_valid_checklist_marks(
+            original_body,
+            ChecklistKind::DefinitionOfDone,
+        )
+        .map_err(|error| format!("{error}\nNo changes were applied."))?;
+    }
+    if ac_touched {
+        let mut criteria = task.acceptance_criteria_items.clone();
+        if options.clear_ac || options.acceptance_criteria.is_some() {
+            let replacement = if options.clear_ac {
+                Vec::new()
+            } else {
+                normalized_create_values(options.acceptance_criteria.clone().unwrap_or_default())
+            };
+            let mut old = criteria.clone();
+            criteria = replacement
+                .into_iter()
+                .enumerate()
+                .map(|(i, text)| {
+                    let checked = old
+                        .iter()
+                        .position(|item| item.text.trim() == text.trim())
+                        .map(|position| old.remove(position).checked)
+                        .unwrap_or(false);
+                    Criterion {
+                        index: i + 1,
+                        text,
+                        checked,
+                    }
+                })
+                .collect();
+        }
+        criteria.extend(
+            normalized_create_values(options.add_ac.clone())
+                .into_iter()
+                .map(|text| Criterion {
+                    index: 0,
+                    text,
+                    checked: false,
+                }),
+        );
+        reindex_criteria(&mut criteria);
+        let removals = checklist_indices(&options.remove_ac, &options.task_id.to_uppercase())?;
+        if !removals.is_empty() {
+            let before = criteria.len();
+            criteria.retain(|item| !removals.contains(&item.index));
+            if before == criteria.len() {
+                return Err(format!(
+                    "Acceptance criterion #{} not found.\nNo changes were applied.",
+                    removals[0]
+                ));
+            }
+            reindex_criteria(&mut criteria);
+        }
+        apply_check_state(
+            &mut criteria,
+            &options.check_ac,
+            true,
+            "Acceptance criterion",
+            &options.task_id.to_uppercase(),
+        )?;
+        apply_check_state(
+            &mut criteria,
+            &options.uncheck_ac,
+            false,
+            "Acceptance criterion",
+            &options.task_id.to_uppercase(),
+        )?;
+        task.acceptance_criteria_items = criteria;
+    }
+    if dod_touched {
+        let mut criteria = task.definition_of_done_items.clone();
+        criteria.extend(
+            normalized_create_values(options.add_dod.clone())
+                .into_iter()
+                .map(|text| Criterion {
+                    index: 0,
+                    text,
+                    checked: false,
+                }),
+        );
+        reindex_criteria(&mut criteria);
+        apply_check_state(
+            &mut criteria,
+            &options.check_dod,
+            true,
+            "Definition of Done item",
+            &options.task_id.to_uppercase(),
+        )?;
+        apply_check_state(
+            &mut criteria,
+            &options.uncheck_dod,
+            false,
+            "Definition of Done item",
+            &options.task_id.to_uppercase(),
+        )?;
+        let removals = checklist_indices(&options.remove_dod, &options.task_id.to_uppercase())?;
+        if !removals.is_empty() {
+            let before = criteria.len();
+            criteria.retain(|item| !removals.contains(&item.index));
+            if before == criteria.len() {
+                return Err(format!(
+                    "Definition of Done item #{} not found.\nNo changes were applied.",
+                    removals[0]
+                ));
+            }
+            reindex_criteria(&mut criteria);
+        }
+        task.definition_of_done_items = criteria;
+    }
+    Ok(())
+}
+
+fn reindex_criteria(criteria: &mut [Criterion]) {
+    for (index, item) in criteria.iter_mut().enumerate() {
+        item.index = index + 1;
+    }
+}
+
+fn apply_check_state(
+    criteria: &mut [Criterion],
+    values: &[String],
+    checked: bool,
+    name: &str,
+    task_id: &str,
+) -> Result<(), String> {
+    for index in checklist_indices(values, task_id)? {
+        let Some(item) = criteria.iter_mut().find(|item| item.index == index) else {
+            return Err(format!(
+                "{name} #{index} not found.\nNo changes were applied."
+            ));
+        };
+        item.checked = checked;
     }
     Ok(())
 }
