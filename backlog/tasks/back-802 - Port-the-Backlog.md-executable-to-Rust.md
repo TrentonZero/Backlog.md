@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@codex'
 created_date: '2026-11-07T21:53:00Z'
-updated_date: '2026-11-12T03:06:00Z'
+updated_date: '2026-11-12T03:19:00Z'
 labels: []
 dependencies:
   - BACK-801
@@ -137,4 +137,6 @@ BACK-802.46 completed: extended Rust task edit with dependency aliases, referenc
 Completed BACK-802.47: Rust task edit now supports Acceptance Criteria replacement, add, clear, indexed check/uncheck/remove, and Definition of Done add/check/uncheck/remove. Verified Rust-vs-TypeScript process parity, checked-state retention, malformed/no-op refusal, and source preservation. Full Rust suite, 49 focused Bun tests, Biome, rustfmt, Clippy, and build passed. Cold and full-context complexity reviews cleared the change. Groma agent instructions were unavailable in this environment.
 
 Completed BACK-802.48: added Rust `draft list` with local read-only DraftStore access, plain and JSON outputs, sorting, count, and pagination. Verified zero-padded draft IDs and huge window values against TypeScript. Full Rust suite, 35 scoped Bun tests, Biome, rustfmt, Clippy, and build passed; cold simplicity and full-context complexity reviews cleared. Groma remains unavailable.
+
+BACK-802.49 completed: Rust draft create now matches the supported TypeScript workflow with auto_commit unset/false. Cargo suite, 9 focused Bun tests, Biome, rustfmt, Clippy, and build passed; cold and complexity reviews cleared. BACK-802.50 tracks remaining selected-path Git commits for configured auto_commit.
 <!-- SECTION:NOTES:END -->

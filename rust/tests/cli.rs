@@ -271,6 +271,123 @@ fn rust_draft_list_matches_typescript_for_plain_json_and_windows() {
 }
 
 #[test]
+fn rust_draft_create_matches_typescript_defaults_values_and_markdown() {
+    let args = [
+        "draft",
+        "create",
+        "  First draft  ",
+        "--desc",
+        "A multiline\ndescription",
+        "-a",
+        "@alice,@bob",
+        "-a",
+        "@carol",
+        "-l",
+        "backend,api",
+        "-l",
+        "ui",
+        "-s",
+        "Done",
+    ];
+    let config = "project_name: CLI Fixture\ntask_prefix: task\nstatuses:\n  - To Do\n  - Done\npriorities:\n  - High\n  - Low\ndefault_assignee:\n  - '@default'\ndefinition_of_done:\n  - Review\n  - Publish\n";
+    let expected_fixture = fixture();
+    let actual_fixture = fixture();
+    for fixture in [&expected_fixture, &actual_fixture] {
+        fixture.file("backlog.config.yml", config);
+        std::fs::remove_dir_all(fixture.0.join("backlog/drafts")).ok();
+    }
+    let expected = typescript_cli(&args, &expected_fixture.0);
+    let actual = rust_cli(&args, &actual_fixture.0);
+    assert_eq!(actual.status.code(), expected.status.code());
+    assert_eq!(actual.stderr, expected.stderr);
+    let actual_stdout = String::from_utf8_lossy(&actual.stdout)
+        .replace(&actual_fixture.0.to_string_lossy().to_string(), "<ROOT>");
+    let expected_stdout = String::from_utf8_lossy(&expected.stdout)
+        .replace(&expected_fixture.0.to_string_lossy().to_string(), "<ROOT>");
+    assert_eq!(actual_stdout, expected_stdout);
+    let parse_created = |fixture: &Fixture| {
+        let path = std::fs::read_dir(fixture.0.join("backlog/drafts"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let mut task =
+            backlog_md::records::parse_task(&std::fs::read_to_string(path).unwrap()).unwrap();
+        task.created_date.clear();
+        task
+    };
+    assert_eq!(
+        parse_created(&actual_fixture),
+        parse_created(&expected_fixture)
+    );
+
+    for args in [
+        &[
+            "draft",
+            "create",
+            "Description precedence",
+            "--description",
+            "Primary",
+            "--desc",
+            "Fallback",
+        ][..],
+        &["draft", "create", "Default draft"][..],
+        &["draft", "create", "Unassigned draft", "-a", ""][..],
+    ] {
+        let expected_fixture = fixture();
+        let actual_fixture = fixture();
+        for fixture in [&expected_fixture, &actual_fixture] {
+            fixture.file("backlog.config.yml", config);
+            std::fs::remove_dir_all(fixture.0.join("backlog/drafts")).ok();
+        }
+        let expected = typescript_cli(args, &expected_fixture.0);
+        let actual = rust_cli(args, &actual_fixture.0);
+        assert_eq!(actual.status.code(), expected.status.code(), "{args:?}");
+        assert_eq!(actual.stderr, expected.stderr, "{args:?}");
+        let actual_stdout = String::from_utf8_lossy(&actual.stdout)
+            .replace(&actual_fixture.0.to_string_lossy().to_string(), "<ROOT>");
+        let expected_stdout = String::from_utf8_lossy(&expected.stdout)
+            .replace(&expected_fixture.0.to_string_lossy().to_string(), "<ROOT>");
+        assert_eq!(actual_stdout, expected_stdout, "{args:?}");
+        assert_eq!(
+            parse_created(&actual_fixture),
+            parse_created(&expected_fixture),
+            "{args:?}"
+        );
+    }
+}
+
+#[test]
+fn rust_draft_create_empty_title_refuses_without_creating_storage() {
+    let args = ["draft", "create", ""];
+    let expected_fixture = fixture();
+    let actual_fixture = fixture();
+    let expected = typescript_cli(&args, &expected_fixture.0);
+    let actual = rust_cli(&args, &actual_fixture.0);
+    assert_eq!(actual.status.code(), expected.status.code());
+    assert_eq!(actual.stdout, expected.stdout);
+    assert_eq!(actual.stderr, expected.stderr);
+    assert!(!expected_fixture.0.join("backlog/drafts").exists());
+    assert!(!actual_fixture.0.join("backlog/drafts").exists());
+    let help = rust_cli(&["draft", "create", "--help"], &actual_fixture.0);
+    assert!(help.status.success());
+    let help = String::from_utf8_lossy(&help.stdout);
+    for option in [
+        "--description",
+        "--desc",
+        "--assignee",
+        "--status",
+        "--labels",
+    ] {
+        assert!(
+            help.contains(option),
+            "missing {option} in draft create help"
+        );
+    }
+}
+
+#[test]
 fn rust_task_view_plain_and_json_match_the_live_typescript_cli() {
     let fixture = fixture();
     for args in [

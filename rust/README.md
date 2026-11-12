@@ -3,13 +3,13 @@
 This Cargo package contains the staged [Rust executable migration](../docs/superpowers/specs/2026-11-07-rust-migration-design.md).
 The `backlog` binary currently provides root help/version plus noninteractive
 `task create`, `task edit`, `task list`, `task view`, `task archive`,
-`task restore`, `task delete`, and `draft list` commands. Task list and view,
-and draft list, support plain or JSON output; list commands support sorting and
-bounded output windows. Task creation supports confirmation output or full plain
-detail; task edit supports core fields, dependency links, references,
-documentation, acceptance criteria, Definition of Done items, explicit clears,
-indexed checklist changes, incremental list changes, and optional full plain
-detail.
+`task restore`, `task delete`, and draft list and create commands. Task list and
+view, and draft list, support plain or JSON output; list commands support
+sorting and bounded output windows. Task creation supports confirmation output
+or full plain detail; task edit supports core fields, dependency links,
+references, documentation, acceptance criteria, Definition of Done items,
+explicit clears, indexed checklist changes, incremental list changes, and
+optional full plain detail.
 The shipped launcher,
 interactive TUI, browser server and MCP adapter still use TypeScript; installation
 cutover has not happened.

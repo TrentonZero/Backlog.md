@@ -50,6 +50,29 @@ enum Command {
 enum DraftCommand {
     /// List local drafts.
     List(DraftListArgs),
+    /// Create a local draft.
+    Create(DraftCreateArgs),
+}
+
+#[derive(Debug, Args)]
+struct DraftCreateArgs {
+    /// Draft title.
+    title: String,
+    /// Draft description.
+    #[arg(short, long)]
+    description: Option<String>,
+    /// Description alias.
+    #[arg(long)]
+    desc: Option<String>,
+    /// Assign one or more @names; repeat or comma-separate values.
+    #[arg(short, long, value_delimiter = ',', action = ArgAction::Append)]
+    assignee: Option<Vec<String>>,
+    /// Accepted for task create compatibility; drafts always have Draft status.
+    #[arg(short, long)]
+    status: Option<String>,
+    /// Draft labels; repeat or comma-separate values.
+    #[arg(short, long, value_delimiter = ',', action = ArgAction::Append)]
+    labels: Option<Vec<String>>,
 }
 
 #[derive(Debug, Args)]
@@ -380,6 +403,9 @@ pub fn run() -> Result<(), String> {
         Command::Draft {
             command: DraftCommand::List(options),
         } => run_draft_list(options),
+        Command::Draft {
+            command: DraftCommand::Create(options),
+        } => run_draft_create(options),
     }
 }
 
@@ -1674,6 +1700,80 @@ fn run_draft_list(options: DraftListArgs) -> Result<(), String> {
         write_stdout(&footer)?;
     }
     Ok(())
+}
+
+fn run_draft_create(options: DraftCreateArgs) -> Result<(), String> {
+    let title = options.title.trim();
+    if title.is_empty() {
+        return Err("Title is required to create a task.".into());
+    }
+    let _ = options.status;
+    let context = project_context()?;
+    let assignee = options
+        .assignee
+        .map(normalized_delimited_create_values)
+        .unwrap_or_else(|| context.config.default_assignee.clone().unwrap_or_default());
+    let definition_of_done_items = normalized_create_values(
+        context
+            .config
+            .definition_of_done
+            .clone()
+            .unwrap_or_default(),
+    )
+    .into_iter()
+    .enumerate()
+    .map(|(index, text)| Criterion {
+        index: index + 1,
+        text,
+        checked: false,
+    })
+    .collect();
+    let task = TaskRecord {
+        id: String::new(),
+        title: title.to_owned(),
+        status: "Draft".into(),
+        assignee,
+        reporter: None,
+        created_date: crate::task_store::utc_timestamp(),
+        updated_date: None,
+        due_date: None,
+        labels: options
+            .labels
+            .map(normalized_delimited_create_values)
+            .unwrap_or_default(),
+        milestone: None,
+        dependencies: Vec::new(),
+        references: Vec::new(),
+        documentation: Vec::new(),
+        modified_files: Vec::new(),
+        raw_content: String::new(),
+        acceptance_criteria_items: Vec::new(),
+        definition_of_done_items,
+        description: options
+            .description
+            .filter(|description| !description.is_empty())
+            .or(options.desc)
+            .unwrap_or_default(),
+        implementation_plan: None,
+        implementation_notes: None,
+        comments: Vec::new(),
+        final_summary: None,
+        parent_task_id: None,
+        subtasks: None,
+        priority: None,
+        task_type: None,
+        project: None,
+        ordinal: None,
+        on_status_change: None,
+    };
+    let entry = DraftStore::new(&context.root, &context.backlog_directory)
+        .create_draft(task, &context.config)
+        .map_err(|error| error.to_string())?;
+    write_stdout(&format!(
+        "Created draft {}\nFile: {}\n",
+        entry.task.id,
+        entry.path.display()
+    ))
 }
 
 fn parse_draft_max_count(value: &str) -> Result<usize, String> {
