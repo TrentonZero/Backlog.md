@@ -3934,3 +3934,230 @@ fn rust_decision_view_preserves_unmanaged_markers_and_crlf_content() {
         &candidate,
     );
 }
+
+#[test]
+fn rust_decision_create_matches_typescript_sections_defaults_and_refusals() {
+    let reference = Fixture::new();
+    let candidate = Fixture::new();
+    std::fs::create_dir_all(reference.0.join("backlog")).unwrap();
+    std::fs::create_dir_all(candidate.0.join("backlog")).unwrap();
+    let args = [
+        "decision",
+        "create",
+        "Choice",
+        "--status",
+        "accepted",
+        "--context",
+        "First line\nSecond line",
+        "--decision",
+        "Use the shared store",
+        "--plain",
+    ];
+    assert_cli_process_parity(&args, &reference, &candidate);
+    let expected =
+        std::fs::read_to_string(reference.0.join("backlog/decisions/decision-1 - Choice.md"))
+            .unwrap();
+    let actual =
+        std::fs::read_to_string(candidate.0.join("backlog/decisions/decision-1 - Choice.md"))
+            .unwrap();
+    let without_date = |source: &str| {
+        source
+            .lines()
+            .map(|line| {
+                if line.starts_with("date:") {
+                    "date: <created>"
+                } else {
+                    line
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    assert_eq!(without_date(&actual), without_date(&expected));
+    assert!(actual.contains("status: accepted"));
+    assert!(actual.contains("First line\nSecond line"));
+    assert!(actual.contains("## Consequences"));
+
+    let default_reference = Fixture::new();
+    let default_candidate = Fixture::new();
+    std::fs::create_dir_all(default_reference.0.join("backlog")).unwrap();
+    std::fs::create_dir_all(default_candidate.0.join("backlog")).unwrap();
+    assert_cli_process_parity(
+        &["decision", "create", "Default", "--context", "Only context"],
+        &default_reference,
+        &default_candidate,
+    );
+    let default_source = std::fs::read_to_string(
+        default_candidate
+            .0
+            .join("backlog/decisions/decision-1 - Default.md"),
+    )
+    .unwrap();
+    assert!(default_source.contains("status: proposed"));
+    assert!(default_source.contains("Only context"));
+    assert!(default_source.contains(
+        "## Decision\n\n<!-- SECTION:DECISION:BEGIN -->\n<!-- SECTION:DECISION:END -->\n\n## Consequences"
+    ));
+
+    for args in [
+        vec!["decision", "create", "   "],
+        vec![
+            "decision",
+            "create",
+            "Unsafe",
+            "--context",
+            "<!-- SECTION:CONTEXT:END -->",
+        ],
+    ] {
+        let reference = Fixture::new();
+        let candidate = Fixture::new();
+        std::fs::create_dir_all(reference.0.join("backlog")).unwrap();
+        std::fs::create_dir_all(candidate.0.join("backlog")).unwrap();
+        assert_cli_process_parity(&args, &reference, &candidate);
+        assert!(!candidate.0.join("backlog/decisions").exists());
+    }
+}
+
+#[test]
+fn rust_decision_edit_matches_typescript_source_preservation_and_refusals() {
+    let source = "---\nid: decision-1\ntitle: Alpha\ndate: 2026-01-01\nstatus: accepted\nsuperseded_by: decision-2\nowner: platform # keep\n---\n\n## Context\n\nOld context.\n\n## Decision\n\nOld choice.\n\n## Consequences\n\nKeep consequences.\n\n## Alternatives\n\nKeep alternatives.\n\n## Revisit trigger\n\nReview next release.\n";
+    let setup = |fixture: &Fixture| {
+        fixture.file("backlog/decisions/decision-1 - Alpha.md", source);
+        fixture.file(
+            "backlog/decisions/decision-2 - Beta.md",
+            "---\nid: decision-2\ntitle: Beta\ndate: 2026-01-02\nstatus: proposed\n---\n",
+        );
+        fixture.file(
+            "backlog/archive/decisions/decision-3 - Archived.md",
+            "---\nid: decision-3\ntitle: Archived\ndate: 2026-01-03\nstatus: rejected\n---\n",
+        );
+    };
+    let reference = Fixture::new();
+    let candidate = Fixture::new();
+    setup(&reference);
+    setup(&candidate);
+
+    for args in [
+        vec![
+            "decision",
+            "edit",
+            "1",
+            "--context",
+            "New context\nwith a second line",
+            "--alternatives",
+            "",
+        ],
+        vec![
+            "decision",
+            "edit",
+            "1",
+            "--title",
+            "Revised",
+            "--status",
+            "Under Review",
+        ],
+    ] {
+        assert_cli_process_parity(&args, &reference, &candidate);
+    }
+
+    let current_path = candidate
+        .0
+        .join("backlog/decisions/decision-1 - Revised.md");
+    assert_cli_process_parity(
+        &["decision", "edit", "1", "--superseded-by", "decision-2"],
+        &reference,
+        &candidate,
+    );
+    let after_link = std::fs::read_to_string(&current_path).unwrap();
+    assert!(after_link.contains("status: Under Review"));
+    assert_cli_process_parity(
+        &["decision", "edit", "1", "--superseded-by", ""],
+        &reference,
+        &candidate,
+    );
+    let before_noop = std::fs::read_to_string(&current_path).unwrap();
+    assert_cli_process_parity(
+        &["decision", "edit", "1", "--status", "Under Review"],
+        &reference,
+        &candidate,
+    );
+    let after_noop = std::fs::read_to_string(&current_path).unwrap();
+    assert_eq!(after_noop, before_noop);
+
+    assert_cli_process_parity(
+        &["decision", "edit", "1", "--status", "accepted"],
+        &reference,
+        &candidate,
+    );
+    let before_identity_errors = std::fs::read_to_string(&current_path).unwrap();
+    for args in [
+        vec!["decision", "edit", "1", "--superseded-by", "1"],
+        vec!["decision", "edit", "1", "--superseded-by", "999"],
+        vec!["decision", "edit", "1"],
+        vec![
+            "decision",
+            "edit",
+            "1",
+            "--context",
+            "<!-- SECTION:CONTEXT:END -->",
+        ],
+    ] {
+        assert_cli_process_parity(&args, &reference, &candidate);
+    }
+
+    for args in [
+        vec!["decision", "edit", "999", "--context", "changed"],
+        vec!["decision", "edit", "3", "--context", "changed"],
+    ] {
+        assert_cli_process_parity(&args, &reference, &candidate);
+    }
+    assert_eq!(
+        std::fs::read_to_string(
+            candidate
+                .0
+                .join("backlog/decisions/decision-1 - Revised.md"),
+        )
+        .unwrap(),
+        before_identity_errors
+    );
+
+    let ambiguous_reference = Fixture::new();
+    let ambiguous_candidate = Fixture::new();
+    setup(&ambiguous_reference);
+    setup(&ambiguous_candidate);
+    for fixture in [&ambiguous_reference, &ambiguous_candidate] {
+        fixture.file("backlog/decisions/decision-001 - Duplicate.md", source);
+    }
+    assert_cli_process_parity(
+        &["decision", "edit", "1", "--context", "changed"],
+        &ambiguous_reference,
+        &ambiguous_candidate,
+    );
+
+    let current = std::fs::read_to_string(
+        candidate
+            .0
+            .join("backlog/decisions/decision-1 - Revised.md"),
+    )
+    .unwrap();
+    assert!(current.contains("owner: platform # keep"));
+    assert!(current.contains("## Revisit trigger\n\nReview next release."));
+    assert!(current.contains("New context\nwith a second line"));
+    assert!(current.contains("status: accepted"));
+    assert!(!current.contains("superseded_by:"));
+    let expected = std::fs::read_to_string(
+        reference
+            .0
+            .join("backlog/decisions/decision-1 - Revised.md"),
+    )
+    .unwrap();
+    let current_frontmatter = backlog_md::frontmatter::parse_frontmatter(&current).unwrap();
+    let expected_frontmatter = backlog_md::frontmatter::parse_frontmatter(&expected).unwrap();
+    assert_eq!(current_frontmatter.content, expected_frontmatter.content);
+    for key in ["id", "title", "status", "owner"] {
+        assert_eq!(
+            current_frontmatter.data[key],
+            expected_frontmatter.data[key]
+        );
+    }
+}

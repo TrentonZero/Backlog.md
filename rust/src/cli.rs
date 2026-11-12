@@ -75,6 +75,10 @@ enum Command {
 
 #[derive(Debug, Subcommand)]
 enum DecisionCommand {
+    /// Create a decision.
+    Create(DecisionCreateArgs),
+    /// Edit an active decision.
+    Edit(DecisionEditArgs),
     /// List active decisions.
     List(DecisionListArgs),
     /// View an active or archived decision.
@@ -83,6 +87,60 @@ enum DecisionCommand {
         #[command(flatten)]
         options: DecisionViewArgs,
     },
+}
+
+#[derive(Debug, Args)]
+struct DecisionCreateArgs {
+    /// Decision title.
+    title: String,
+    /// Decision status; defaults to proposed.
+    #[arg(short, long)]
+    status: Option<String>,
+    /// Replace the Context section.
+    #[arg(long)]
+    context: Option<String>,
+    /// Replace the Decision section.
+    #[arg(long)]
+    decision: Option<String>,
+    /// Replace the Consequences section.
+    #[arg(long)]
+    consequences: Option<String>,
+    /// Replace the Alternatives section.
+    #[arg(long)]
+    alternatives: Option<String>,
+    /// Use human-readable output.
+    #[arg(long)]
+    plain: bool,
+}
+
+#[derive(Debug, Args)]
+struct DecisionEditArgs {
+    /// Decision ID.
+    decision_id: String,
+    /// Replace the decision title.
+    #[arg(short, long)]
+    title: Option<String>,
+    /// Replace the decision status.
+    #[arg(short, long)]
+    status: Option<String>,
+    /// Replace the Context section.
+    #[arg(long)]
+    context: Option<String>,
+    /// Replace the Decision section.
+    #[arg(long)]
+    decision: Option<String>,
+    /// Replace the Consequences section.
+    #[arg(long)]
+    consequences: Option<String>,
+    /// Replace the Alternatives section.
+    #[arg(long)]
+    alternatives: Option<String>,
+    /// Set the replacing decision; pass an empty value to clear.
+    #[arg(long)]
+    superseded_by: Option<String>,
+    /// Use human-readable output.
+    #[arg(long)]
+    plain: bool,
 }
 
 #[derive(Debug, Args)]
@@ -729,6 +787,12 @@ pub fn run() -> Result<(), String> {
         Command::Doc {
             command: DocCommand::Delete { document_id },
         } => run_document_lifecycle(&document_id, DocumentLifecycleOperation::Delete),
+        Command::Decision {
+            command: DecisionCommand::Create(options),
+        } => run_decision_create(options),
+        Command::Decision {
+            command: DecisionCommand::Edit(options),
+        } => run_decision_edit(options),
         Command::Decision {
             command: DecisionCommand::List(options),
         } => run_decision_list(options),
@@ -2526,6 +2590,83 @@ fn run_document_view(document_id: &str, options: DocumentViewArgs) -> Result<(),
     } else {
         write_stdout(&format!("{content}\n"))
     }
+}
+
+fn run_decision_create(options: DecisionCreateArgs) -> Result<(), String> {
+    let context = project_context()?;
+    let _ = options.plain;
+    let store = DecisionStore::new(&context.root, &context.backlog_directory, &context.prefix);
+    let entry = store
+        .create_decision(
+            crate::decision_store::DecisionCreateInput {
+                title: options.title,
+                status: options.status,
+                context: options.context.unwrap_or_default(),
+                decision: options.decision.unwrap_or_default(),
+                consequences: options.consequences.unwrap_or_default(),
+                alternatives: options.alternatives,
+            },
+            &context.config,
+        )
+        .map_err(|error| error.to_string())?;
+    commit_created_record(
+        &context,
+        "Decision",
+        &format!("backlog: Add decision {}", entry.decision.id),
+        &entry.path,
+    )?;
+    write_stdout(&format!("Created decision {}\n", entry.decision.id))
+}
+
+fn run_decision_edit(options: DecisionEditArgs) -> Result<(), String> {
+    let has_field = options.title.is_some()
+        || options.status.is_some()
+        || options.context.is_some()
+        || options.decision.is_some()
+        || options.consequences.is_some()
+        || options.alternatives.is_some()
+        || options.superseded_by.is_some();
+    if !has_field {
+        return Err("Provide at least one edit field. For example: backlog decision edit decision-1 --context \"New context\"".into());
+    }
+
+    let context = project_context()?;
+    let _ = options.plain;
+    let store = DecisionStore::new(&context.root, &context.backlog_directory, &context.prefix);
+    let existing = store
+        .get_decision(&options.decision_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("Decision {} not found", options.decision_id))?;
+    let updated = store
+        .update_decision(
+            &options.decision_id,
+            crate::decision_store::DecisionUpdateInput {
+                title: options.title,
+                status: options.status,
+                context: options.context,
+                decision: options.decision,
+                consequences: options.consequences,
+                alternatives: options.alternatives,
+                superseded_by: options.superseded_by,
+            },
+        )
+        .map_err(|error| match error {
+            crate::decision_store::DecisionStoreError::NotFound(id) => {
+                format!("Decision {id} not found")
+            }
+            other => other.to_string(),
+        })?;
+    let selected_paths = if existing.path == updated.path {
+        vec![updated.path.clone()]
+    } else {
+        vec![existing.path, updated.path.clone()]
+    };
+    commit_record_change(
+        &context,
+        &format!("backlog: Update decision {}", updated.decision.id),
+        &selected_paths,
+    )?;
+    write_stdout(&format!("Updated decision {}\n", updated.decision.id))
 }
 
 fn run_decision_list(options: DecisionListArgs) -> Result<(), String> {
