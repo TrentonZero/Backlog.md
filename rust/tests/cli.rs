@@ -567,6 +567,300 @@ fn rust_task_create_matches_configured_assignee_dod_and_explicit_clear_defaults(
 }
 
 #[test]
+fn rust_task_edit_core_fields_and_plain_output_match_live_typescript() {
+    let expected_fixture = fixture();
+    let actual_fixture = fixture();
+    for fixture in [&expected_fixture, &actual_fixture] {
+        fixture.file(
+            "backlog/tasks/task-1-first.md",
+            "---\nid: task-1\ntitle: First task\nstatus: To Do\npriority: high\nlabels:\n  - backend\ndependencies:\n  - task-2\ncustom: retained\ncreated_date: 2026-01-01\n---\n## Notes\n\nKeep this body.\n",
+        );
+        fixture.file(
+            "backlog.config.yml",
+            "project_name: CLI Fixture\ntask_prefix: task\nstatuses:\n  - To Do\n  - Done\npriorities:\n  - High\n  - Low\ntypes:\n  - bug\nprojects:\n  - Alpha\n",
+        );
+        fixture.file(
+            "backlog/milestones/m-1-release-x.md",
+            "---\nid: m-1\ntitle: Release X\ncreated_date: 2026-01-01\n---\n",
+        );
+    }
+    let args = [
+        "task",
+        "edit",
+        "1",
+        "--title",
+        "Renamed task",
+        "--desc",
+        "Updated description",
+        "--status",
+        "done",
+        "-a",
+        "@alice,@bob",
+        "-l",
+        "ui,bug",
+        "--priority",
+        "LOW",
+        "--type",
+        "BUG",
+        "--project",
+        "alpha",
+        "--due-date",
+        "2026-08-10",
+        "--ordinal",
+        "2500",
+        "--milestone",
+        "Release X",
+        "--plain",
+    ];
+    let expected = typescript_cli(&args, &expected_fixture.0);
+    let actual = rust_cli(&args, &actual_fixture.0);
+    assert_eq!(actual.status.code(), expected.status.code());
+    assert_eq!(actual.stderr, expected.stderr);
+    let actual_stdout = String::from_utf8_lossy(&actual.stdout)
+        .replace(&actual_fixture.0.to_string_lossy().to_string(), "<ROOT>");
+    let expected_stdout = String::from_utf8_lossy(&expected.stdout)
+        .replace(&expected_fixture.0.to_string_lossy().to_string(), "<ROOT>");
+    assert_eq!(actual_stdout, expected_stdout);
+    let read_task = |fixture: &Fixture| {
+        let path = std::fs::read_dir(fixture.0.join("backlog/tasks"))
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .find(|path| {
+                std::fs::read_to_string(path).is_ok_and(|source| {
+                    backlog_md::records::parse_task(&source)
+                        .is_ok_and(|task| task.id.eq_ignore_ascii_case("task-1"))
+                })
+            })
+            .unwrap();
+        (
+            path.file_name().unwrap().to_string_lossy().into_owned(),
+            std::fs::read_to_string(path).unwrap(),
+        )
+    };
+    let (actual_filename, actual_source) = read_task(&actual_fixture);
+    let (expected_filename, expected_source) = read_task(&expected_fixture);
+    assert_eq!(actual_filename, expected_filename);
+    for preserved in ["custom: retained", "## Notes", "Keep this body."] {
+        assert!(
+            actual_source.contains(preserved),
+            "lost source text: {preserved}"
+        );
+        assert!(
+            expected_source.contains(preserved),
+            "reference lacks source text: {preserved}"
+        );
+    }
+    let mut actual_task = backlog_md::records::parse_task(&actual_source).unwrap();
+    let mut expected_task = backlog_md::records::parse_task(&expected_source).unwrap();
+    actual_task.updated_date = None;
+    expected_task.updated_date = None;
+    assert_eq!(actual_task, expected_task);
+}
+
+#[test]
+fn rust_task_edit_conflicting_label_flags_match_live_typescript_without_writes() {
+    let expected_fixture = fixture();
+    let actual_fixture = fixture();
+    let args = ["task", "edit", "1", "--label", "new", "--add-label", "more"];
+    let expected = typescript_cli(&args, &expected_fixture.0);
+    let actual = rust_cli(&args, &actual_fixture.0);
+    assert_eq!(actual.status.code(), expected.status.code());
+    assert_eq!(actual.stdout, expected.stdout);
+    assert_eq!(actual.stderr, expected.stderr);
+    let read_task = |fixture: &Fixture| {
+        std::fs::read_to_string(fixture.0.join("backlog/tasks/task-1-first.md")).unwrap()
+    };
+    assert_eq!(read_task(&actual_fixture), read_task(&expected_fixture));
+}
+
+#[test]
+fn rust_task_edit_invalid_fields_match_live_typescript_without_writes() {
+    for args in [
+        vec!["task", "edit", "1", "--status", "Unknown"],
+        vec!["task", "edit", "1", "--title", ""],
+        vec!["task", "edit", "1", "--due-date", "2026-02-30"],
+        vec![
+            "task",
+            "edit",
+            "1",
+            "--due-date",
+            "2026-08-10",
+            "--clear-due-date",
+        ],
+    ] {
+        let expected_fixture = fixture();
+        let actual_fixture = fixture();
+        let expected = typescript_cli(&args, &expected_fixture.0);
+        let actual = rust_cli(&args, &actual_fixture.0);
+        assert_eq!(actual.status.code(), expected.status.code(), "{args:?}");
+        assert_eq!(actual.stdout, expected.stdout, "{args:?}");
+        assert_eq!(actual.stderr, expected.stderr, "{args:?}");
+        for path in ["task-1-first.md", "task-2-second.md"] {
+            let relative = format!("backlog/tasks/{path}");
+            assert_eq!(
+                std::fs::read(actual_fixture.0.join(&relative)).unwrap(),
+                std::fs::read(expected_fixture.0.join(&relative)).unwrap(),
+                "{args:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn rust_task_edit_identity_refusals_match_live_typescript_without_writes() {
+    for identity in ["missing", "archived", "ambiguous"] {
+        let expected_fixture = fixture();
+        let actual_fixture = fixture();
+        if identity != "missing" {
+            for fixture in [&expected_fixture, &actual_fixture] {
+                let task_source =
+                    std::fs::read_to_string(fixture.0.join("backlog/tasks/task-1-first.md"))
+                        .unwrap();
+                let archive_path = fixture.0.join("backlog/archive/tasks/task-1-first.md");
+                std::fs::create_dir_all(archive_path.parent().unwrap()).unwrap();
+                std::fs::write(&archive_path, &task_source).unwrap();
+                if identity == "archived" {
+                    std::fs::remove_file(fixture.0.join("backlog/tasks/task-1-first.md")).unwrap();
+                }
+            }
+        }
+        let task_id = if identity == "missing" { "404" } else { "1" };
+        let args = ["task", "edit", task_id, "--title", "Changed"];
+        let expected = typescript_cli(&args, &expected_fixture.0);
+        let actual = rust_cli(&args, &actual_fixture.0);
+        assert_eq!(actual.status.code(), expected.status.code(), "{identity}");
+        assert_eq!(actual.stdout, expected.stdout, "{identity}");
+        let actual_stderr = String::from_utf8_lossy(&actual.stderr)
+            .replace(&actual_fixture.0.to_string_lossy().to_string(), "<ROOT>");
+        let expected_stderr = String::from_utf8_lossy(&expected.stderr)
+            .replace(&expected_fixture.0.to_string_lossy().to_string(), "<ROOT>");
+        assert_eq!(actual_stderr, expected_stderr, "{identity}");
+        let collect = |fixture: &Fixture| {
+            [
+                "backlog/tasks/task-1-first.md",
+                "backlog/archive/tasks/task-1-first.md",
+            ]
+            .into_iter()
+            .filter_map(|path| {
+                std::fs::read(fixture.0.join(path))
+                    .ok()
+                    .map(|bytes| (path, bytes))
+            })
+            .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            collect(&actual_fixture),
+            collect(&expected_fixture),
+            "{identity}"
+        );
+    }
+}
+
+#[test]
+fn rust_task_edit_help_documents_supported_core_fields() {
+    let fixture = Fixture::new();
+    let output = rust_cli(&["task", "edit", "--help"], &fixture.0);
+    assert!(output.status.success());
+    let help = String::from_utf8_lossy(&output.stdout);
+    for option in [
+        "--title",
+        "--description",
+        "--desc",
+        "--assignee",
+        "--status",
+        "--label",
+        "-l",
+        "--add-label",
+        "--remove-label",
+        "--clear-labels",
+        "--priority",
+        "--type",
+        "--project",
+        "--due-date",
+        "--clear-due-date",
+        "--ordinal",
+        "--milestone",
+        "--clear-milestone",
+        "--plain",
+    ] {
+        assert!(
+            help.contains(option),
+            "missing {option} from task edit help"
+        );
+    }
+}
+
+#[test]
+fn rust_task_edit_default_confirmation_matches_live_typescript() {
+    let expected_fixture = fixture();
+    let actual_fixture = fixture();
+    let args = ["task", "edit", "1", "--status", "Done"];
+    let expected = typescript_cli(&args, &expected_fixture.0);
+    let actual = rust_cli(&args, &actual_fixture.0);
+    assert_eq!(actual.status.code(), expected.status.code());
+    assert_eq!(actual.stdout, expected.stdout);
+    assert_eq!(actual.stderr, expected.stderr);
+    let parse_task = |fixture: &Fixture| {
+        let path = fixture.0.join("backlog/tasks/task-1-first.md");
+        backlog_md::records::parse_task(&std::fs::read_to_string(path).unwrap()).unwrap()
+    };
+    let mut actual_task = parse_task(&actual_fixture);
+    let mut expected_task = parse_task(&expected_fixture);
+    actual_task.updated_date = None;
+    expected_task.updated_date = None;
+    assert_eq!(actual_task, expected_task);
+}
+
+#[test]
+fn rust_task_edit_explicit_clears_match_live_typescript() {
+    let expected_fixture = fixture();
+    let actual_fixture = fixture();
+    for fixture in [&expected_fixture, &actual_fixture] {
+        fixture.file(
+            "backlog.config.yml",
+            "project_name: CLI Fixture\ntask_prefix: task\nstatuses:\n  - To Do\n  - Done\npriorities:\n  - High\n  - Low\ntypes:\n  - bug\nprojects:\n  - Alpha\n",
+        );
+        fixture.file(
+            "backlog/milestones/m-1-release-x.md",
+            "---\nid: m-1\ntitle: Release X\ncreated_date: 2026-01-01\n---\n",
+        );
+        fixture.file(
+            "backlog/tasks/task-1-first.md",
+            "---\nid: task-1\ntitle: First task\nstatus: To Do\npriority: high\nlabels:\n  - backend\nassignee:\n  - '@alice'\ntype: bug\nproject: Alpha\ndue_date: 2026-08-10\nmilestone: m-1\ncreated_date: 2026-01-01\n---\n",
+        );
+    }
+    let args = [
+        "task",
+        "edit",
+        "1",
+        "--clear-labels",
+        "--assignee",
+        "",
+        "--type",
+        "",
+        "--project",
+        "",
+        "--clear-due-date",
+        "--clear-milestone",
+    ];
+    let expected = typescript_cli(&args, &expected_fixture.0);
+    let actual = rust_cli(&args, &actual_fixture.0);
+    assert_eq!(actual.status.code(), expected.status.code());
+    assert_eq!(actual.stdout, expected.stdout);
+    assert_eq!(actual.stderr, expected.stderr);
+    let parse_task = |fixture: &Fixture| {
+        let path = fixture.0.join("backlog/tasks/task-1-first.md");
+        backlog_md::records::parse_task(&std::fs::read_to_string(path).unwrap()).unwrap()
+    };
+    let mut actual_task = parse_task(&actual_fixture);
+    let mut expected_task = parse_task(&expected_fixture);
+    actual_task.updated_date = None;
+    expected_task.updated_date = None;
+    assert_eq!(actual_task, expected_task);
+}
+
+#[test]
 fn rust_cli_help_and_version_are_available_without_a_project() {
     let fixture = Fixture::new();
     for args in [

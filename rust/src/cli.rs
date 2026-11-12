@@ -52,6 +52,8 @@ enum TaskCommand {
     },
     /// Create a task in the local working copy.
     Create(Box<TaskCreateArgs>),
+    /// Edit one task in the local working copy.
+    Edit(Box<TaskEditArgs>),
 }
 
 #[derive(Debug, Args)]
@@ -125,6 +127,63 @@ struct TaskCreateArgs {
     #[arg(long = "modified-file", action = ArgAction::Append)]
     modified_files: Vec<String>,
     /// Print the full task detail after creation.
+    #[arg(long)]
+    plain: bool,
+}
+
+#[derive(Debug, Args)]
+struct TaskEditArgs {
+    /// Task ID to edit.
+    task_id: String,
+    /// Replacement title.
+    #[arg(short, long)]
+    title: Option<String>,
+    /// Replacement description.
+    #[arg(short, long, visible_alias = "desc")]
+    description: Option<String>,
+    /// Replacement status.
+    #[arg(short, long)]
+    status: Option<String>,
+    /// Replace all assignees; repeat or comma-separate values.
+    #[arg(short, long, value_delimiter = ',', action = ArgAction::Append)]
+    assignee: Option<Vec<String>>,
+    /// Replace all labels; repeat or comma-separate values.
+    #[arg(short = 'l', long = "label", value_delimiter = ',', action = ArgAction::Append)]
+    labels: Option<Vec<String>>,
+    /// Add labels without replacing existing labels.
+    #[arg(long = "add-label", value_delimiter = ',', action = ArgAction::Append)]
+    add_labels: Vec<String>,
+    /// Remove labels without replacing other labels.
+    #[arg(long = "remove-label", value_delimiter = ',', action = ArgAction::Append)]
+    remove_labels: Vec<String>,
+    /// Remove all labels.
+    #[arg(long)]
+    clear_labels: bool,
+    /// Configured task priority.
+    #[arg(long)]
+    priority: Option<String>,
+    /// Configured task type; pass an empty value to clear.
+    #[arg(long = "type")]
+    task_type: Option<String>,
+    /// Configured project; pass an empty value to clear.
+    #[arg(long)]
+    project: Option<String>,
+    /// Set due date in YYYY-MM-DD format.
+    #[arg(long)]
+    due_date: Option<String>,
+    /// Clear the due date.
+    #[arg(long)]
+    clear_due_date: bool,
+    /// Set manual non-negative ordinal.
+    #[arg(long)]
+    ordinal: Option<f64>,
+    /// Assign milestone by ID or title.
+    #[arg(short, long)]
+    milestone: Option<String>,
+    /// Clear the milestone assignment.
+    #[arg(long)]
+    clear_milestone: bool,
+    /// Print full task detail after editing.
     #[arg(long)]
     plain: bool,
 }
@@ -206,6 +265,9 @@ pub fn run() -> Result<(), String> {
         Command::Task {
             command: TaskCommand::Create(options),
         } => run_task_create(*options),
+        Command::Task {
+            command: TaskCommand::Edit(options),
+        } => run_task_edit(*options),
     }
 }
 
@@ -547,6 +609,247 @@ fn run_task_create(options: TaskCreateArgs) -> Result<(), String> {
         entry.task.id,
         entry.path.display()
     ))
+}
+
+fn run_task_edit(options: TaskEditArgs) -> Result<(), String> {
+    let context = project_context()?;
+    if options.clear_due_date && options.due_date.is_some() {
+        return Err(
+            "Cannot use --due-date and --clear-due-date together.\nNo changes were applied.".into(),
+        );
+    }
+    if options.clear_milestone && options.milestone.is_some() {
+        return Err(
+            "Cannot use --milestone and --clear-milestone together.\nNo changes were applied."
+                .into(),
+        );
+    }
+    if options.clear_labels
+        && (options.labels.is_some()
+            || !options.add_labels.is_empty()
+            || !options.remove_labels.is_empty())
+    {
+        return Err("Cannot combine --clear-labels with --label, --add-label, or --remove-label. Use --clear-labels by itself, or --label a,b for the final full label set.\nNo changes were applied.".into());
+    }
+    if options.labels.is_some()
+        && (!options.add_labels.is_empty() || !options.remove_labels.is_empty())
+    {
+        return Err("Cannot combine --label with --add-label or --remove-label. Use --label a,b for the final full label set, or use add/remove flags without --label.\nNo changes were applied.".into());
+    }
+    if options
+        .ordinal
+        .is_some_and(|ordinal| !ordinal.is_finite() || ordinal < 0.0)
+    {
+        return Err(format!(
+            "Invalid ordinal: {}. Must be a non-negative number.\nNo changes were applied.",
+            options.ordinal.unwrap()
+        ));
+    }
+
+    let entry = context
+        .store
+        .load_task(&options.task_id)
+        .map_err(|error| format!("{}\nNo changes were applied.", error))?;
+    let Some(entry) = entry else {
+        let archived = context.store.list_archived_tasks();
+        if let Some(candidate) = archived
+            .iter()
+            .find(|candidate| task_ids_equal(&options.task_id, &candidate.task.id, &context.prefix))
+        {
+            return Err(format!(
+                "{}\nNo changes were applied.",
+                crate::task_store::TaskStoreError::Archived(candidate.task.id.clone())
+            ));
+        }
+        return Err(format!(
+            "Task {} not found. Task lookups read only the local working copy; use 'backlog browser' to see tasks from other branches.\nNo changes were applied.",
+            options.task_id
+        ));
+    };
+
+    let mut updated = entry.task.clone();
+    if let Some(title) = options.title.filter(|title| !title.is_empty()) {
+        let title = title.trim();
+        if title.is_empty() {
+            return Err("Title cannot be empty.\nNo changes were applied.".into());
+        }
+        updated.title = title.to_owned();
+    }
+    if let Some(description) = options.description {
+        updated.description = description;
+    }
+    if let Some(status) = options.status.filter(|status| !status.trim().is_empty()) {
+        updated.status =
+            resolve_config_value(&status, &context.config.statuses).ok_or_else(|| {
+                format!(
+                    "Invalid status: {status}. Valid statuses are: {}\nNo changes were applied.",
+                    context.config.statuses.join(", ")
+                )
+            })?;
+    }
+    if let Some(assignee) = options.assignee {
+        updated.assignee = normalized_create_values(assignee);
+    }
+
+    let label_values = options.labels.map(normalized_delimited_create_values);
+    if options.clear_labels {
+        updated.labels.clear();
+    } else if let Some(labels) = label_values
+        && !labels.is_empty()
+    {
+        updated.labels = labels;
+    }
+    for label in normalized_delimited_create_values(options.add_labels) {
+        if !updated
+            .labels
+            .iter()
+            .any(|existing| existing.eq_ignore_ascii_case(&label))
+        {
+            updated.labels.push(label);
+        }
+    }
+    let removals = normalized_delimited_create_values(options.remove_labels);
+    if !removals.is_empty() {
+        updated.labels.retain(|label| {
+            !removals
+                .iter()
+                .any(|removed| removed.eq_ignore_ascii_case(label))
+        });
+    }
+
+    if let Some(priority) = options
+        .priority
+        .filter(|priority| !priority.trim().is_empty())
+    {
+        let defaults = ["High".into(), "Medium".into(), "Low".into()];
+        let values = context.config.priorities.as_deref().unwrap_or(&defaults);
+        updated.priority = Some(
+            resolve_config_value(&priority, values)
+                .ok_or_else(|| {
+                    format!(
+                        "Invalid priority: {priority}. Valid values are: {}\nNo changes were applied.",
+                        values.join(", ")
+                    )
+                })?
+                .to_lowercase(),
+        );
+    }
+    if let Some(task_type) = options.task_type {
+        if task_type.is_empty() {
+            updated.task_type = None;
+        } else {
+            let defaults = [
+                "bug".into(),
+                "feature".into(),
+                "enhancement".into(),
+                "task".into(),
+                "chore".into(),
+                "docs".into(),
+                "spike".into(),
+            ];
+            let values = context.config.types.as_deref().unwrap_or(&defaults);
+            updated.task_type =
+                Some(resolve_config_value(&task_type, values).ok_or_else(|| {
+                    format!(
+                        "Invalid type: {task_type}. Valid types are: {}\nNo changes were applied.",
+                        values.join(", ")
+                    )
+                })?);
+        }
+    }
+    if let Some(project) = options.project {
+        if project.is_empty() {
+            updated.project = None;
+        } else {
+            let values = context.config.projects.as_deref().unwrap_or_default();
+            if values.is_empty() {
+                return Err("No projects are configured. Add a 'projects:' list to the project config file.\nNo changes were applied.".into());
+            }
+            updated.project = Some(resolve_config_value(&project, values).ok_or_else(|| {
+                format!(
+                    "Invalid project: {project}. Valid projects are: {}\nNo changes were applied.",
+                    values.join(", ")
+                )
+            })?);
+        }
+    }
+    if let Some(due_date) = options.due_date {
+        updated.due_date = Some(due_date);
+    } else if options.clear_due_date {
+        updated.due_date = None;
+    }
+    if let Some(ordinal) = options.ordinal {
+        updated.ordinal = Some(ordinal);
+    }
+    if let Some(milestone) = options.milestone {
+        updated.milestone = Some(resolve_milestone_for_create(
+            &milestone,
+            &context.root,
+            &context.backlog_directory,
+        )?);
+    } else if options.clear_milestone {
+        updated.milestone = None;
+    }
+
+    let updated_entry = if updated != entry.task {
+        updated.updated_date = Some(crate::task_store::utc_timestamp());
+        context
+            .store
+            .update_task(updated)
+            .map_err(|error| {
+                let message = error.to_string();
+                let message = message.replace(
+                    "due_date must be a date in",
+                    "Due date must be a date in",
+                );
+                format!("{message}\nNo changes were applied.")
+            })?
+            .ok_or_else(|| {
+                format!(
+                    "Task {} not found. Task lookups read only the local working copy; use 'backlog browser' to see tasks from other branches.\nNo changes were applied.",
+                    options.task_id
+                )
+            })?
+    } else {
+        entry
+    };
+    let mut updated_task = updated_entry.task;
+    updated_task.id = canonical_task_id(&updated_task.id, &context.prefix);
+    if options.plain {
+        let active = context
+            .store
+            .list_tasks()
+            .into_iter()
+            .map(|entry| entry.task)
+            .collect::<Vec<_>>();
+        let archived = context
+            .store
+            .list_archived_tasks()
+            .into_iter()
+            .map(|entry| entry.task)
+            .collect::<Vec<_>>();
+        let detail = build_task_detail(
+            &updated_task,
+            &active,
+            &archived,
+            &context.config.statuses,
+            &[],
+            &context.prefix,
+        );
+        return write_stdout(&format!(
+            "{}\n",
+            format_task_detail(
+                &detail,
+                &updated_entry.path,
+                false,
+                &active,
+                &context.config,
+                &context.prefix,
+                true,
+            )
+        ));
+    }
+    write_stdout(&format!("Updated task {}\n", updated_task.id))
 }
 
 fn normalized_create_values(values: Vec<String>) -> Vec<String> {

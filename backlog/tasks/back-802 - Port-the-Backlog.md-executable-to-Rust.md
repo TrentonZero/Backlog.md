@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@codex'
 created_date: '2026-11-07T21:53:00Z'
-updated_date: '2026-11-12T01:00:00Z'
+updated_date: '2026-11-12T02:17:00Z'
 labels: []
 dependencies:
   - BACK-801
@@ -125,4 +125,8 @@ BACK-802.38 completed: added the Rust searchable body and indexed field builder 
 BACK-802.39 completed: implemented Fuse-compatible Rust task search with stable relevance ordering and shared full-corpus filter semantics. Full Rust suite, Clippy, rustfmt, focused TypeScript parity (49 tests), Biome check, and diff check passed; cold simplicity and complexity reviews found no blockers. Groma remains unavailable (command not found). Remaining migration work includes other app/query behavior, canonical CLI, HTTP/WebSocket browser server, MCP, TUI, distribution, and final compatibility/cutover gates.
 
 BACK-802.40 completed: added the Rust task statistics projection and UTC date parser with live TypeScript parity for ordering, archives, duplicate IDs, malformed/offset dates, empty inputs, and result limits. Full Rust formatting, Clippy, and Cargo tests passed; the TypeScript statistics suite (12), Biome, and diff checks passed; reviews found no blockers. The statistics model is not yet wired into the CLI overview, browser endpoint, or TUI. Groma remains unavailable.
+
+BACK-802.41 added the Rust CLI entrypoint and task list command. BACK-802.42 added task detail view with archived lookup and dependency/readiness output. BACK-802.43 added noninteractive task creation with live TypeScript parity and locked default ordinal assignment. Remaining migration surfaces include task edit/lifecycle commands, drafts/documents/decisions/milestones command adapters, browser server, MCP, TUI, distribution, and cutover gates.
+
+BACK-802.44 completed: added Rust task edit for core fields, labels, aliases, clears, locked persistence, canonical identity errors, and default/plain output. Live TypeScript parity, source preservation, identity refusals, no-write failures, and explicit clears are covered. Full Rust tests, focused Bun edit/date/milestone tests (24), rustfmt, Clippy, build, Biome, and diff checks passed; cold simplicity and complexity reviews cleared. Groma remains unavailable (command not found).
 <!-- SECTION:NOTES:END -->
