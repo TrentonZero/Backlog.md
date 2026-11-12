@@ -5,7 +5,8 @@ The `backlog` binary currently provides root help/version plus noninteractive
 `task create`, `task edit`, `task list`, `task view`, `task archive`,
 `task restore`, and `task delete` commands. List and view support plain or JSON
 output; task creation supports confirmation output or full plain detail; task
-edit supports core fields, incremental labels, and optional full plain detail.
+edit supports core fields, dependency links, references, documentation, explicit
+clears, incremental list changes, and optional full plain detail.
 The shipped launcher,
 interactive TUI, browser server and MCP adapter still use TypeScript; installation
 cutover has not happened.

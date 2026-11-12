@@ -189,6 +189,36 @@ struct TaskEditArgs {
     /// Clear the milestone assignment.
     #[arg(long)]
     clear_milestone: bool,
+    /// Set dependencies; repeat or comma-separate IDs. Pass an empty value to clear.
+    #[arg(long = "depends-on", visible_alias = "dep", value_delimiter = ',', action = ArgAction::Append)]
+    dependencies: Option<Vec<String>>,
+    /// Clear all dependencies.
+    #[arg(long)]
+    clear_deps: bool,
+    /// Replace all references; repeat or comma-separate values. Pass an empty value to clear.
+    #[arg(long = "ref", value_delimiter = ',', action = ArgAction::Append)]
+    references: Option<Vec<String>>,
+    /// Add references without replacing existing references.
+    #[arg(long = "add-ref", value_delimiter = ',', action = ArgAction::Append)]
+    add_references: Vec<String>,
+    /// Remove references without replacing other references.
+    #[arg(long = "remove-ref", value_delimiter = ',', action = ArgAction::Append)]
+    remove_references: Vec<String>,
+    /// Clear all references.
+    #[arg(long)]
+    clear_refs: bool,
+    /// Replace all documentation; repeat or comma-separate values. Pass an empty value to clear.
+    #[arg(long = "doc", value_delimiter = ',', action = ArgAction::Append)]
+    documentation: Option<Vec<String>>,
+    /// Add documentation without replacing existing documentation.
+    #[arg(long = "add-doc", value_delimiter = ',', action = ArgAction::Append)]
+    add_documentation: Vec<String>,
+    /// Remove documentation without replacing other entries.
+    #[arg(long = "remove-doc", value_delimiter = ',', action = ArgAction::Append)]
+    remove_documentation: Vec<String>,
+    /// Clear all documentation.
+    #[arg(long)]
+    clear_docs: bool,
     /// Print full task detail after editing.
     #[arg(long)]
     plain: bool,
@@ -628,6 +658,7 @@ fn run_task_create(options: TaskCreateArgs) -> Result<(), String> {
 
 fn run_task_edit(options: TaskEditArgs) -> Result<(), String> {
     let context = project_context()?;
+    validate_task_edit_list_options(&options)?;
     if options.clear_due_date && options.due_date.is_some() {
         return Err(
             "Cannot use --due-date and --clear-due-date together.\nNo changes were applied.".into(),
@@ -805,6 +836,46 @@ fn run_task_edit(options: TaskEditArgs) -> Result<(), String> {
     } else if options.clear_milestone {
         updated.milestone = None;
     }
+    if let Some(dependencies) = options.dependencies {
+        updated.dependencies = normalized_delimited_create_values(dependencies);
+    }
+    if options.clear_deps {
+        updated.dependencies.clear();
+    }
+    if let Some(references) = options.references {
+        updated.references = normalized_delimited_create_values(references);
+    }
+    if options.clear_refs {
+        updated.references.clear();
+    }
+    for reference in normalized_delimited_create_values(options.add_references) {
+        if !updated.references.contains(&reference) {
+            updated.references.push(reference);
+        }
+    }
+    let removals = normalized_delimited_create_values(options.remove_references);
+    if !removals.is_empty() {
+        updated
+            .references
+            .retain(|reference| !removals.contains(reference));
+    }
+    if let Some(documentation) = options.documentation {
+        updated.documentation = normalized_delimited_create_values(documentation);
+    }
+    if options.clear_docs {
+        updated.documentation.clear();
+    }
+    for document in normalized_delimited_create_values(options.add_documentation) {
+        if !updated.documentation.contains(&document) {
+            updated.documentation.push(document);
+        }
+    }
+    let removals = normalized_delimited_create_values(options.remove_documentation);
+    if !removals.is_empty() {
+        updated
+            .documentation
+            .retain(|document| !removals.contains(document));
+    }
 
     let updated_entry = if updated != entry.task {
         updated.updated_date = Some(crate::task_store::utc_timestamp());
@@ -812,12 +883,10 @@ fn run_task_edit(options: TaskEditArgs) -> Result<(), String> {
             .store
             .update_task(updated)
             .map_err(|error| {
-                let message = error.to_string();
-                let message = message.replace(
-                    "due_date must be a date in",
-                    "Due date must be a date in",
-                );
-                format!("{message}\nNo changes were applied.")
+                format!(
+                    "{}\nNo changes were applied.",
+                    task_edit_store_error(error, &entry.task.id, &context.prefix)
+                )
             })?
             .ok_or_else(|| {
                 format!(
@@ -865,6 +934,110 @@ fn run_task_edit(options: TaskEditArgs) -> Result<(), String> {
         ));
     }
     write_stdout(&format!("Updated task {}\n", updated_task.id))
+}
+
+fn validate_task_edit_list_options(options: &TaskEditArgs) -> Result<(), String> {
+    let values_are_blank = |values: &[String]| {
+        values
+            .iter()
+            .all(|value| value.split(',').all(|item| item.trim().is_empty()))
+    };
+    let has_nonblank = |values: &[String]| !values.is_empty() && !values_are_blank(values);
+    if options.clear_deps && options.dependencies.as_deref().is_some_and(has_nonblank) {
+        return Err("Cannot combine --clear-deps with --depends-on or --dep. Use --clear-deps by itself.\nNo changes were applied.".into());
+    }
+    if options.clear_refs && options.references.as_deref().is_some_and(has_nonblank) {
+        return Err("Cannot combine --clear-refs with --ref. Use --clear-refs by itself.\nNo changes were applied.".into());
+    }
+    if options.clear_refs && has_nonblank(&options.add_references) {
+        return Err("Cannot combine --clear-refs with --add-ref. Use --clear-refs by itself.\nNo changes were applied.".into());
+    }
+    if options.clear_refs && has_nonblank(&options.remove_references) {
+        return Err("Cannot combine --clear-refs with --remove-ref. Use --clear-refs by itself.\nNo changes were applied.".into());
+    }
+    if options.references.is_some()
+        && (!options.add_references.is_empty() || !options.remove_references.is_empty())
+    {
+        return Err("Cannot combine --ref with --add-ref or --remove-ref. Use --ref a,b for the final full reference set, or use add/remove flags without --ref.\nNo changes were applied.".into());
+    }
+    if options.clear_docs && options.documentation.as_deref().is_some_and(has_nonblank) {
+        return Err("Cannot combine --clear-docs with --doc. Use --clear-docs by itself.\nNo changes were applied.".into());
+    }
+    if options.clear_docs && has_nonblank(&options.add_documentation) {
+        return Err("Cannot combine --clear-docs with --add-doc. Use --clear-docs by itself.\nNo changes were applied.".into());
+    }
+    if options.clear_docs && has_nonblank(&options.remove_documentation) {
+        return Err("Cannot combine --clear-docs with --remove-doc. Use --clear-docs by itself.\nNo changes were applied.".into());
+    }
+    if options.documentation.is_some()
+        && (!options.add_documentation.is_empty() || !options.remove_documentation.is_empty())
+    {
+        return Err("Cannot combine --doc with --add-doc or --remove-doc. Use --doc a,b for the final full documentation set, or use add/remove flags without --doc.\nNo changes were applied.".into());
+    }
+    for (flag, values, clear_flag, subject) in [
+        (
+            "--add-ref",
+            &options.add_references,
+            "--clear-refs",
+            "references",
+        ),
+        (
+            "--remove-ref",
+            &options.remove_references,
+            "--clear-refs",
+            "references",
+        ),
+        (
+            "--add-doc",
+            &options.add_documentation,
+            "--clear-docs",
+            "documentation",
+        ),
+        (
+            "--remove-doc",
+            &options.remove_documentation,
+            "--clear-docs",
+            "documentation",
+        ),
+    ] {
+        if values
+            .iter()
+            .any(|value| values_are_blank(std::slice::from_ref(value)))
+        {
+            return Err(format!(
+                "Cannot use an empty value with {flag}. Use {clear_flag} to remove all {subject}.\nNo changes were applied."
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn task_edit_store_error(
+    error: crate::task_store::TaskStoreError,
+    task_id: &str,
+    prefix: &str,
+) -> String {
+    let message = error
+        .to_string()
+        .replace("due_date must be a date in", "Due date must be a date in");
+    if let Some((_, details)) = message
+        .strip_prefix("Task ")
+        .and_then(|message| message.split_once(" cannot depend on itself"))
+    {
+        return format!(
+            "Task {} cannot depend on itself{details}",
+            canonical_task_id(task_id, prefix)
+        );
+    }
+    if let Some(cycle) = message.strip_prefix("These dependencies would create a cycle: ") {
+        let cycle = cycle
+            .split(" -> ")
+            .map(|task_id| canonical_task_id(task_id, prefix))
+            .collect::<Vec<_>>()
+            .join(" -> ");
+        return format!("These dependencies would create a cycle: {cycle}");
+    }
+    message
 }
 
 fn run_task_archive(task_id: &str) -> Result<(), String> {
