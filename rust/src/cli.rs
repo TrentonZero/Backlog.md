@@ -708,6 +708,12 @@ fn run_task_create(options: TaskCreateArgs) -> Result<(), String> {
         .store
         .create_task_with_default_ordinal(task, &context.config)
         .map_err(|error| error.to_string())?;
+    commit_created_record(
+        &context,
+        "Task",
+        &format!("Create task {}", entry.task.id),
+        &entry.path,
+    )?;
     if options.plain {
         let active = context
             .store
@@ -974,7 +980,7 @@ fn run_task_edit(options: TaskEditArgs) -> Result<(), String> {
 
     let updated_entry = if updated != entry.task {
         updated.updated_date = Some(crate::task_store::utc_timestamp());
-        context
+        let updated_entry = context
             .store
             .update_task(updated)
             .map_err(|error| {
@@ -988,7 +994,16 @@ fn run_task_edit(options: TaskEditArgs) -> Result<(), String> {
                     "Task {} not found. Task lookups read only the local working copy; use 'backlog browser' to see tasks from other branches.\nNo changes were applied.",
                     options.task_id
                 )
-            })?
+            })?;
+        commit_record_change(
+            &context,
+            &format!(
+                "Update task {}",
+                canonical_task_id(&updated_entry.task.id, &context.prefix)
+            ),
+            std::slice::from_ref(&updated_entry.path),
+        )?;
+        updated_entry
     } else {
         entry
     };
@@ -1357,6 +1372,21 @@ fn run_task_archive(task_id: &str) -> Result<(), String> {
     {
         return Err(task_not_found(task_id));
     }
+    let archived_path = context
+        .backlog_directory
+        .join("archive/tasks")
+        .join(task.path.file_name().unwrap_or_default());
+    commit_record_change(
+        &context,
+        &format!("backlog: Archive task {}", task.task.id),
+        &[task.path.clone(), archived_path],
+    )
+    .map_err(|error| {
+        format!(
+            "Task {} was archived, but the change was not committed: {error}",
+            task.task.id
+        )
+    })?;
     write_stdout(&format!("Archived task {id}\n"))
 }
 
@@ -1381,6 +1411,11 @@ fn run_task_restore(task_id: &str) -> Result<(), String> {
         return Err(task_not_found(task_id));
     };
     let archived_id = task.task.id.clone();
+    let archived_path = task.path.clone();
+    let active_path = context
+        .backlog_directory
+        .join("tasks")
+        .join(archived_path.file_name().unwrap_or_default());
     if !context
         .store
         .restore_task(&archived_id)
@@ -1388,6 +1423,14 @@ fn run_task_restore(task_id: &str) -> Result<(), String> {
     {
         return Err(task_not_found(task_id));
     }
+    commit_record_change(
+        &context,
+        &format!("backlog: Restore task {archived_id}"),
+        &[archived_path, active_path],
+    )
+    .map_err(|error| {
+        format!("Task {archived_id} was restored, but the change was not committed: {error}")
+    })?;
     write_stdout(&format!("Restored task {archived_id}\n"))
 }
 
@@ -1412,6 +1455,10 @@ fn run_task_delete(task_id: &str) -> Result<(), String> {
         return Err(task_not_found(task_id));
     };
     let archived_id = task.task.id.clone();
+    let board_path = context
+        .backlog_directory
+        .join("tasks")
+        .join(task.path.file_name().unwrap_or_default());
     let deletion = context
         .store
         .delete_task(&archived_id)
@@ -1419,6 +1466,16 @@ fn run_task_delete(task_id: &str) -> Result<(), String> {
     if !deletion.success {
         return Err(task_not_found(task_id));
     }
+    let mut changed_paths = deletion.changed_paths;
+    changed_paths.push(board_path);
+    commit_record_change(
+        &context,
+        &format!("backlog: Delete task {archived_id}"),
+        &changed_paths,
+    )
+    .map_err(|error| {
+        format!("Task {archived_id} was deleted, but the change was not committed: {error}")
+    })?;
     write_stdout(&format!("Deleted task {archived_id}\n"))?;
     if !deletion.cleaned_task_ids.is_empty() {
         write_stdout(&format!(
@@ -1769,11 +1826,68 @@ fn run_draft_create(options: DraftCreateArgs) -> Result<(), String> {
     let entry = DraftStore::new(&context.root, &context.backlog_directory)
         .create_draft(task, &context.config)
         .map_err(|error| error.to_string())?;
+    commit_created_record(
+        &context,
+        "Draft",
+        &format!("{} - Create draft {}", entry.task.id, entry.task.id),
+        &entry.path,
+    )?;
     write_stdout(&format!(
         "Created draft {}\nFile: {}\n",
         entry.task.id,
         entry.path.display()
     ))
+}
+
+fn commit_record_change(
+    context: &ProjectContext,
+    message: &str,
+    paths: &[PathBuf],
+) -> Result<(), String> {
+    crate::git::GitRepository::new(&context.root).commit_selected_paths(
+        message,
+        paths,
+        &context.config,
+    )
+}
+
+fn commit_created_record(
+    context: &ProjectContext,
+    record_kind: &str,
+    message: &str,
+    path: &PathBuf,
+) -> Result<(), String> {
+    if context.config.auto_commit != Some(true) || context.config.filesystem_only == Some(true) {
+        return Ok(());
+    }
+    let written = fs::read(path).map_err(|error| error.to_string())?;
+    match commit_record_change(context, message, std::slice::from_ref(path)) {
+        Ok(()) => Ok(()),
+        Err(error) => match fs::read(path) {
+            Ok(current) if current == written => {
+                fs::remove_file(path).map_err(|cleanup| {
+                    format!("{record_kind} creation failed and cleanup also failed: {cleanup}; Git reported: {error}")
+                })?;
+                let error = error.replace(
+                    "The files remain in the working tree; their previous index entries were restored.",
+                    "The previous index entries were restored.",
+                );
+                Err(format!(
+                    "{record_kind} creation failed; the uncommitted record at {} was removed after the Git commit failed. {error}",
+                    path.display()
+                ))
+            }
+            Ok(_) => Err(format!(
+                "{record_kind} creation failed, and cleanup could not safely remove the changed file at {}. Your changes were preserved. Review or remove the preserved file before retrying. Git reported: {error}",
+                path.display()
+            )),
+            Err(read_error) if read_error.kind() == std::io::ErrorKind::NotFound => Err(error),
+            Err(read_error) => Err(format!(
+                "{record_kind} creation failed and cleanup could not inspect {}: {read_error}. Git reported: {error}",
+                path.display()
+            )),
+        },
+    }
 }
 
 fn parse_draft_max_count(value: &str) -> Result<usize, String> {

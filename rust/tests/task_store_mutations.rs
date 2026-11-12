@@ -325,6 +325,16 @@ fn archived_task_deletion_matches_live_typescript_cleanup_and_releases_id() {
         deleted.cleaned_task_ids,
         vec!["TASK-1", "TASK-2", "DRAFT-1"]
     );
+    let mut changed_paths = deleted.changed_paths.clone();
+    changed_paths.sort();
+    let mut expected_changed_paths = vec![
+        linked_path.clone(),
+        archived_link.clone(),
+        drafts.join("draft-1 - Draft.md"),
+        archived_tasks.join("task-3 - Task-TASK-3.md"),
+    ];
+    expected_changed_paths.sort();
+    assert_eq!(changed_paths, expected_changed_paths);
     assert!(
         !rust_root
             .join("backlog/archive/tasks/task-3 - Task-TASK-3.md")

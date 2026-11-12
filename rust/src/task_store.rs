@@ -51,6 +51,7 @@ struct VacatedLinkRecords {
 pub struct TaskDeletionResult {
     pub success: bool,
     pub cleaned_task_ids: Vec<String>,
+    pub changed_paths: Vec<PathBuf>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -763,6 +764,7 @@ impl TaskStore {
             return Ok(TaskDeletionResult {
                 success: false,
                 cleaned_task_ids: Vec::new(),
+                changed_paths: Vec::new(),
             });
         };
 
@@ -772,6 +774,7 @@ impl TaskStore {
                 return Ok(TaskDeletionResult {
                     success: false,
                     cleaned_task_ids: Vec::new(),
+                    changed_paths: Vec::new(),
                 });
             };
             let mut candidates = self.vacated_link_records(&current.task.id);
@@ -809,6 +812,7 @@ impl TaskStore {
                 return Ok(TaskDeletionResult {
                     success: false,
                     cleaned_task_ids: Vec::new(),
+                    changed_paths: Vec::new(),
                 });
             };
             let fresh = self.vacated_link_records(&current.task.id);
@@ -863,6 +867,7 @@ impl TaskStore {
                 .map_err(|error| TaskStoreError::CreateLock(error.to_string()))?;
 
             let mut cleaned_task_ids = Vec::new();
+            let mut changed_paths = Vec::new();
             let records_to_clean: Vec<(&Path, &str)> = fresh
                 .tasks
                 .iter()
@@ -879,6 +884,7 @@ impl TaskStore {
                     self.clean_vacated_links(path, record_id, &current.task.id, &create_lock)?
                 {
                     cleaned_task_ids.push(cleaned_id);
+                    changed_paths.push(path.to_path_buf());
                 }
             }
             for lock in &task_locks {
@@ -894,9 +900,11 @@ impl TaskStore {
                 .map_err(|error| TaskStoreError::CreateLock(error.to_string()))?;
             fs::remove_file(&current.path)
                 .map_err(|error| TaskStoreError::Storage(error.to_string()))?;
+            changed_paths.push(current.path);
             return Ok(TaskDeletionResult {
                 success: true,
                 cleaned_task_ids,
+                changed_paths,
             });
         }
         Err(TaskStoreError::TaskLock(format!(

@@ -9,7 +9,9 @@ sorting and bounded output windows. Task creation supports confirmation output
 or full plain detail; task edit supports core fields, dependency links,
 references, documentation, acceptance criteria, Definition of Done items,
 explicit clears, indexed checklist changes, incremental list changes, and
-optional full plain detail.
+optional full plain detail. Configured auto-commit applies to supported task and
+draft writes, committing only their record paths while preserving unrelated
+staged changes.
 The shipped launcher,
 interactive TUI, browser server and MCP adapter still use TypeScript; installation
 cutover has not happened.

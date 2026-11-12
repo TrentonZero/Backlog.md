@@ -67,6 +67,12 @@ impl Storage {
             write_complete_file(&temporary, contents)?;
             match source {
                 None => fs::hard_link(&temporary, target),
+                Some(source)
+                    if source == target
+                        && fs::symlink_metadata(source)?.file_type().is_symlink() =>
+                {
+                    fs::write(source, contents)
+                }
                 Some(source) if source == target => fs::rename(&temporary, target),
                 Some(source) => {
                     fs::hard_link(&temporary, target)?;

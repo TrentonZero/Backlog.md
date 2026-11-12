@@ -65,6 +65,43 @@ fn typescript_cli(args: &[&str], cwd: &std::path::Path) -> Output {
         .unwrap()
 }
 
+fn git(cwd: &std::path::Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
+}
+
+fn initialize_git_fixture(fixture: &Fixture) {
+    git(&fixture.0, &["init", "-b", "main"]);
+    git(&fixture.0, &["config", "user.name", "Backlog Test"]);
+    git(
+        &fixture.0,
+        &["config", "user.email", "backlog-test@example.com"],
+    );
+    git(&fixture.0, &["add", "."]);
+    git(&fixture.0, &["commit", "-m", "Baseline"]);
+    fixture.file("UNRELATED.txt", "keep staged\n");
+    git(&fixture.0, &["add", "UNRELATED.txt"]);
+}
+
+fn selected_commit_result(fixture: &Fixture) -> (String, String, String) {
+    let message = git(&fixture.0, &["log", "-1", "--format=%s"]);
+    let files = git(
+        &fixture.0,
+        &["diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"],
+    );
+    let staged = git(&fixture.0, &["diff", "--cached", "--name-only"]);
+    (message, files, staged)
+}
+
 fn fixture() -> Fixture {
     let fixture = Fixture::new();
     fixture.file(
@@ -169,6 +206,653 @@ fn rust_task_list_empty_project_matches_the_live_typescript_cli() {
             assert_eq!(actual_json, expected_json);
         } else {
             assert_eq!(actual.stdout, expected.stdout);
+        }
+    }
+}
+
+#[test]
+fn rust_task_create_auto_commit_matches_typescript_and_preserves_unrelated_index_entries() {
+    let expected_fixture = Fixture::new();
+    let actual_fixture = Fixture::new();
+    for fixture in [&expected_fixture, &actual_fixture] {
+        fixture.file(
+            "backlog.config.yml",
+            "project_name: CLI Fixture\ntask_prefix: task\nstatuses:\n  - To Do\n  - Done\nauto_commit: true\n",
+        );
+        std::fs::create_dir_all(fixture.0.join("backlog/tasks")).unwrap();
+        initialize_git_fixture(fixture);
+    }
+    let args = ["task", "create", "Committed from Rust"];
+    let expected = typescript_cli(&args, &expected_fixture.0);
+    let actual = rust_cli(&args, &actual_fixture.0);
+    assert!(
+        expected.status.success(),
+        "{}",
+        String::from_utf8_lossy(&expected.stderr)
+    );
+    assert!(
+        actual.status.success(),
+        "{}",
+        String::from_utf8_lossy(&actual.stderr)
+    );
+    assert_eq!(actual.status.code(), expected.status.code());
+    let actual_stdout = String::from_utf8_lossy(&actual.stdout)
+        .replace(&actual_fixture.0.to_string_lossy().to_string(), "<ROOT>");
+    let expected_stdout = String::from_utf8_lossy(&expected.stdout)
+        .replace(&expected_fixture.0.to_string_lossy().to_string(), "<ROOT>");
+    assert_eq!(actual_stdout, expected_stdout);
+    assert_eq!(actual.stderr, expected.stderr);
+    assert_eq!(
+        selected_commit_result(&actual_fixture),
+        selected_commit_result(&expected_fixture)
+    );
+    let (message, committed_files, staged_files) = selected_commit_result(&actual_fixture);
+    assert_eq!(message, "Create task TASK-1");
+    assert!(committed_files.contains("backlog/tasks/"));
+    assert_eq!(staged_files, "UNRELATED.txt");
+}
+
+#[test]
+fn rust_task_create_auto_commit_is_a_noop_outside_git_repositories() {
+    let expected_fixture = Fixture::new();
+    let actual_fixture = Fixture::new();
+    for fixture in [&expected_fixture, &actual_fixture] {
+        fixture.file(
+            "backlog.config.yml",
+            "project_name: CLI Fixture\ntask_prefix: task\nstatuses:\n  - To Do\n  - Done\nauto_commit: true\n",
+        );
+        std::fs::create_dir_all(fixture.0.join("backlog/tasks")).unwrap();
+    }
+    let args = ["task", "create", "No repository"];
+    let expected = typescript_cli(&args, &expected_fixture.0);
+    let actual = rust_cli(&args, &actual_fixture.0);
+    assert_eq!(actual.status.code(), expected.status.code());
+    assert_eq!(
+        String::from_utf8_lossy(&actual.stdout)
+            .replace(&actual_fixture.0.to_string_lossy().to_string(), "<ROOT>"),
+        String::from_utf8_lossy(&expected.stdout)
+            .replace(&expected_fixture.0.to_string_lossy().to_string(), "<ROOT>")
+    );
+    assert_eq!(actual.stderr, expected.stderr);
+    assert_eq!(
+        std::fs::read_dir(actual_fixture.0.join("backlog/tasks"))
+            .unwrap()
+            .count(),
+        1
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn rust_task_create_commits_to_a_symlinked_backlog_repository() {
+    use std::os::unix::fs::symlink;
+
+    let expected_project = Fixture::new();
+    let expected_backlog = Fixture::new();
+    let actual_project = Fixture::new();
+    let actual_backlog = Fixture::new();
+    for (project, backlog) in [
+        (&expected_project, &expected_backlog),
+        (&actual_project, &actual_backlog),
+    ] {
+        std::fs::remove_file(project.0.join("backlog.config.yml")).unwrap();
+        git(&backlog.0, &["init", "-b", "main"]);
+        git(&backlog.0, &["config", "user.name", "Backlog Test"]);
+        git(
+            &backlog.0,
+            &["config", "user.email", "backlog-test@example.com"],
+        );
+        backlog.file(
+            "config.yml",
+            "project_name: Symlinked Backlog\nstatuses:\n  - To Do\nauto_commit: true\n",
+        );
+        std::fs::create_dir_all(backlog.0.join("tasks")).unwrap();
+        std::fs::create_dir_all(backlog.0.join("drafts")).unwrap();
+        backlog.file("README.md", "# Backlog\n");
+        git(&backlog.0, &["add", "."]);
+        git(&backlog.0, &["commit", "-m", "Baseline"]);
+        backlog.file("UNRELATED.txt", "keep staged\n");
+        git(&backlog.0, &["add", "UNRELATED.txt"]);
+        symlink(&backlog.0, project.0.join("backlog")).unwrap();
+    }
+    let args = ["task", "create", "Symlinked repository task"];
+    let expected = typescript_cli(&args, &expected_project.0);
+    let actual = rust_cli(&args, &actual_project.0);
+    assert_eq!(actual.status.code(), expected.status.code());
+    assert!(
+        actual.status.success(),
+        "Rust: {}\nTypeScript: {}",
+        String::from_utf8_lossy(&actual.stderr),
+        String::from_utf8_lossy(&expected.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&actual.stdout)
+            .replace(&actual_project.0.to_string_lossy().to_string(), "<ROOT>"),
+        String::from_utf8_lossy(&expected.stdout)
+            .replace(&expected_project.0.to_string_lossy().to_string(), "<ROOT>")
+    );
+    assert_eq!(actual.stderr, expected.stderr);
+    assert_eq!(
+        selected_commit_result(&actual_backlog),
+        selected_commit_result(&expected_backlog)
+    );
+    assert_eq!(
+        git(&actual_backlog.0, &["log", "-1", "--format=%s"]),
+        "Create task TASK-1"
+    );
+    assert_eq!(
+        git(&actual_backlog.0, &["diff", "--cached", "--name-only"]),
+        "UNRELATED.txt"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn rust_task_create_hook_failure_matches_typescript_file_and_index_state() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let expected_fixture = Fixture::new();
+    let actual_fixture = Fixture::new();
+    for fixture in [&expected_fixture, &actual_fixture] {
+        fixture.file(
+            "backlog.config.yml",
+            "project_name: CLI Fixture\ntask_prefix: task\nstatuses:\n  - To Do\n  - Done\nauto_commit: true\n",
+        );
+        std::fs::create_dir_all(fixture.0.join("backlog/tasks")).unwrap();
+        initialize_git_fixture(fixture);
+        let hook = fixture.0.join(".git/hooks/pre-commit");
+        std::fs::write(&hook, "#!/bin/sh\nexit 1\n").unwrap();
+        let mut permissions = std::fs::metadata(&hook).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(hook, permissions).unwrap();
+    }
+    let args = ["task", "create", "Rejected by hook"];
+    let expected = typescript_cli(&args, &expected_fixture.0);
+    let actual = rust_cli(&args, &actual_fixture.0);
+    assert_eq!(actual.status.code(), expected.status.code());
+    let actual_stderr = String::from_utf8_lossy(&actual.stderr)
+        .replace(&actual_fixture.0.to_string_lossy().to_string(), "<ROOT>");
+    let expected_stderr = String::from_utf8_lossy(&expected.stderr)
+        .replace(&expected_fixture.0.to_string_lossy().to_string(), "<ROOT>");
+    assert!(
+        expected_stderr.contains("commit task file"),
+        "{expected_stderr}"
+    );
+    assert!(
+        actual_stderr.contains("Selected-path Git commit failed"),
+        "{actual_stderr}"
+    );
+    assert!(actual_stderr.contains("previous index entries were restored"));
+    assert!(!actual_stderr.contains("remain in the working tree"));
+    assert_eq!(
+        git(&actual_fixture.0, &["rev-parse", "HEAD"]),
+        git(&expected_fixture.0, &["rev-parse", "HEAD"])
+    );
+    assert_eq!(
+        git(&actual_fixture.0, &["diff", "--cached", "--name-only"]),
+        git(&expected_fixture.0, &["diff", "--cached", "--name-only"])
+    );
+    assert_eq!(
+        std::fs::read_dir(actual_fixture.0.join("backlog/tasks"))
+            .unwrap()
+            .count(),
+        std::fs::read_dir(expected_fixture.0.join("backlog/tasks"))
+            .unwrap()
+            .count()
+    );
+    assert_eq!(
+        git(&actual_fixture.0, &["diff", "--cached", "--name-only"]),
+        "UNRELATED.txt"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn rust_task_create_bypasses_hooks_when_configured() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let expected_fixture = Fixture::new();
+    let actual_fixture = Fixture::new();
+    for fixture in [&expected_fixture, &actual_fixture] {
+        fixture.file(
+            "backlog.config.yml",
+            "project_name: CLI Fixture\ntask_prefix: task\nstatuses:\n  - To Do\n  - Done\nauto_commit: true\nbypass_git_hooks: true\n",
+        );
+        std::fs::create_dir_all(fixture.0.join("backlog/tasks")).unwrap();
+        initialize_git_fixture(fixture);
+        let hook = fixture.0.join(".git/hooks/pre-commit");
+        std::fs::write(&hook, "#!/bin/sh\nexit 1\n").unwrap();
+        let mut permissions = std::fs::metadata(&hook).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(hook, permissions).unwrap();
+    }
+    let args = ["task", "create", "Hooks are bypassed"];
+    let expected = typescript_cli(&args, &expected_fixture.0);
+    let actual = rust_cli(&args, &actual_fixture.0);
+    assert_eq!(actual.status.code(), expected.status.code());
+    assert!(actual.status.success());
+    assert_eq!(
+        selected_commit_result(&actual_fixture),
+        selected_commit_result(&expected_fixture)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn rust_selected_path_hooks_see_only_the_record_being_committed() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let expected_fixture = Fixture::new();
+    let actual_fixture = Fixture::new();
+    for fixture in [&expected_fixture, &actual_fixture] {
+        fixture.file(
+            "backlog.config.yml",
+            "project_name: CLI Fixture\ntask_prefix: task\nstatuses:\n  - To Do\n  - Done\nauto_commit: true\n",
+        );
+        std::fs::create_dir_all(fixture.0.join("backlog/tasks")).unwrap();
+        initialize_git_fixture(fixture);
+        let hook = fixture.0.join(".git/hooks/pre-commit");
+        std::fs::write(
+            &hook,
+            "#!/bin/sh\ngit diff --cached --name-only > hook-index.txt\n",
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&hook).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(hook, permissions).unwrap();
+    }
+    let args = ["task", "create", "Hook index scope"];
+    let expected = typescript_cli(&args, &expected_fixture.0);
+    let actual = rust_cli(&args, &actual_fixture.0);
+    assert_eq!(actual.status.code(), expected.status.code());
+    assert!(actual.status.success());
+    assert_eq!(
+        std::fs::read_to_string(actual_fixture.0.join("hook-index.txt")).unwrap(),
+        std::fs::read_to_string(expected_fixture.0.join("hook-index.txt")).unwrap()
+    );
+    assert!(
+        !std::fs::read_to_string(actual_fixture.0.join("hook-index.txt"))
+            .unwrap()
+            .contains("UNRELATED.txt")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn rust_selected_path_commit_honors_git_signing_configuration() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let expected_fixture = Fixture::new();
+    let actual_fixture = Fixture::new();
+    for fixture in [&expected_fixture, &actual_fixture] {
+        fixture.file(
+            "backlog.config.yml",
+            "project_name: CLI Fixture\ntask_prefix: task\nstatuses:\n  - To Do\n  - Done\nauto_commit: true\n",
+        );
+        std::fs::create_dir_all(fixture.0.join("backlog/tasks")).unwrap();
+        initialize_git_fixture(fixture);
+        let signer = fixture.0.join("fake-gpg");
+        std::fs::write(
+            &signer,
+            "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' '-----BEGIN PGP SIGNATURE-----' '' 'dGVzdA==' '-----END PGP SIGNATURE-----'\n",
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&signer).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&signer, permissions).unwrap();
+        git(&fixture.0, &["config", "commit.gpgsign", "true"]);
+        git(&fixture.0, &["config", "user.signingkey", "fixture-key"]);
+        git(
+            &fixture.0,
+            &["config", "gpg.program", signer.to_str().unwrap()],
+        );
+    }
+    let args = ["task", "create", "Signed selected-path commit"];
+    let expected = typescript_cli(&args, &expected_fixture.0);
+    let actual = rust_cli(&args, &actual_fixture.0);
+    assert_eq!(
+        actual.status.code(),
+        expected.status.code(),
+        "Rust: {}\nTypeScript: {}",
+        String::from_utf8_lossy(&actual.stderr),
+        String::from_utf8_lossy(&expected.stderr)
+    );
+    assert!(!actual.status.success());
+    assert!(!expected.status.success());
+    assert!(String::from_utf8_lossy(&actual.stderr).contains("gpg failed to sign the data"));
+    assert!(String::from_utf8_lossy(&expected.stderr).contains("gpg failed to sign the data"));
+    assert_eq!(
+        selected_commit_result(&actual_fixture),
+        selected_commit_result(&expected_fixture)
+    );
+    assert_eq!(
+        git(&actual_fixture.0, &["log", "-1", "--format=%s"]),
+        "Baseline"
+    );
+    assert_eq!(
+        git(&actual_fixture.0, &["diff", "--cached", "--name-only"]),
+        "UNRELATED.txt"
+    );
+    assert_eq!(
+        std::fs::read_dir(actual_fixture.0.join("backlog/tasks"))
+            .unwrap()
+            .count(),
+        0
+    );
+}
+
+#[test]
+fn rust_draft_create_auto_commit_matches_typescript_and_filesystem_only_disables_it() {
+    for filesystem_only in [false, true] {
+        let expected_fixture = Fixture::new();
+        let actual_fixture = Fixture::new();
+        for fixture in [&expected_fixture, &actual_fixture] {
+            fixture.file(
+                "backlog.config.yml",
+                &format!(
+                    "project_name: CLI Fixture\ntask_prefix: task\nstatuses:\n  - To Do\n  - Done\nauto_commit: true\nfilesystem_only: {filesystem_only}\n"
+                ),
+            );
+            std::fs::create_dir_all(fixture.0.join("backlog/tasks")).unwrap();
+            initialize_git_fixture(fixture);
+        }
+        let args = ["draft", "create", "A draft"];
+        let expected = typescript_cli(&args, &expected_fixture.0);
+        let actual = rust_cli(&args, &actual_fixture.0);
+        assert_eq!(actual.status.code(), expected.status.code());
+        assert_eq!(
+            String::from_utf8_lossy(&actual.stdout)
+                .replace(&actual_fixture.0.to_string_lossy().to_string(), "<ROOT>"),
+            String::from_utf8_lossy(&expected.stdout)
+                .replace(&expected_fixture.0.to_string_lossy().to_string(), "<ROOT>")
+        );
+        assert_eq!(
+            selected_commit_result(&actual_fixture),
+            selected_commit_result(&expected_fixture)
+        );
+        if filesystem_only {
+            assert_eq!(
+                git(&actual_fixture.0, &["log", "-1", "--format=%s"]),
+                "Baseline"
+            );
+            assert_eq!(
+                git(&actual_fixture.0, &["diff", "--cached", "--name-only"]),
+                "UNRELATED.txt"
+            );
+        } else {
+            assert_eq!(
+                git(&actual_fixture.0, &["log", "-1", "--format=%s"]),
+                "DRAFT-1 - Create draft DRAFT-1"
+            );
+        }
+    }
+}
+
+#[test]
+fn rust_task_archive_and_restore_auto_commit_only_the_moved_record() {
+    let expected_fixture = Fixture::new();
+    let actual_fixture = Fixture::new();
+    for fixture in [&expected_fixture, &actual_fixture] {
+        fixture.file(
+            "backlog.config.yml",
+            "project_name: CLI Fixture\ntask_prefix: task\nstatuses:\n  - To Do\n  - Done\nauto_commit: true\n",
+        );
+        fixture.file(
+            "backlog/tasks/task-1-first.md",
+            "---\nid: task-1\ntitle: First task\nstatus: To Do\ncreated_date: 2026-01-01\n---\n",
+        );
+        initialize_git_fixture(fixture);
+    }
+    for args in [
+        &["task", "archive", "task-1"][..],
+        &["task", "restore", "task-1"][..],
+        &["task", "archive", "task-1"][..],
+        &["task", "delete", "task-1"][..],
+    ] {
+        let expected = typescript_cli(args, &expected_fixture.0);
+        let actual = rust_cli(args, &actual_fixture.0);
+        assert_eq!(
+            actual.status.code(),
+            expected.status.code(),
+            "{args:?}\nRust: {}\nTypeScript: {}",
+            String::from_utf8_lossy(&actual.stderr),
+            String::from_utf8_lossy(&expected.stderr)
+        );
+        assert_eq!(actual.stdout, expected.stdout, "{args:?}");
+        assert_eq!(actual.stderr, expected.stderr, "{args:?}");
+        assert_eq!(
+            selected_commit_result(&actual_fixture),
+            selected_commit_result(&expected_fixture),
+            "{args:?}"
+        );
+        assert_eq!(
+            git(&actual_fixture.0, &["diff", "--cached", "--name-only"]),
+            "UNRELATED.txt"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn rust_task_lifecycle_commits_symlink_paths_without_committing_their_targets() {
+    for target_inside_repository in [true, false] {
+        let expected_fixture = Fixture::new();
+        let actual_fixture = Fixture::new();
+        let expected_outside = Fixture::new();
+        let actual_outside = Fixture::new();
+        for (fixture, outside) in [
+            (&expected_fixture, &expected_outside),
+            (&actual_fixture, &actual_outside),
+        ] {
+            fixture.file(
+                "backlog.config.yml",
+                "project_name: CLI Fixture\ntask_prefix: task\nstatuses:\n  - To Do\n  - Done\nauto_commit: true\n",
+            );
+            let task_path = fixture.0.join("backlog/tasks/task-1-first.md");
+            fixture.file(
+                "backlog/tasks/task-1-first.md",
+                "---\nid: task-1\ntitle: First task\nstatus: To Do\ncreated_date: 2026-01-01\n---\n",
+            );
+            let target = if target_inside_repository {
+                fixture.0.join("notes/task.md")
+            } else {
+                outside.0.join("task.md")
+            };
+            std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+            let contents = std::fs::read(&task_path).unwrap();
+            std::fs::write(&target, contents).unwrap();
+            std::fs::remove_file(&task_path).unwrap();
+            std::os::unix::fs::symlink(&target, &task_path).unwrap();
+            initialize_git_fixture(fixture);
+        }
+        for args in [
+            &["task", "archive", "task-1"][..],
+            &["task", "restore", "task-1"][..],
+            &["task", "archive", "task-1"][..],
+            &["task", "delete", "task-1"][..],
+        ] {
+            let expected = typescript_cli(args, &expected_fixture.0);
+            let actual = rust_cli(args, &actual_fixture.0);
+            assert_eq!(
+                actual.status.code(),
+                expected.status.code(),
+                "inside={target_inside_repository} {args:?}\nRust: {}\nTypeScript: {}",
+                String::from_utf8_lossy(&actual.stderr),
+                String::from_utf8_lossy(&expected.stderr)
+            );
+            assert_eq!(actual.stdout, expected.stdout, "{args:?}");
+            assert_eq!(actual.stderr, expected.stderr, "{args:?}");
+            assert_eq!(
+                selected_commit_result(&actual_fixture),
+                selected_commit_result(&expected_fixture),
+                "inside={target_inside_repository} {args:?}"
+            );
+        }
+        assert_eq!(
+            git(&actual_fixture.0, &["status", "--porcelain"]),
+            "A  UNRELATED.txt"
+        );
+        let target = if target_inside_repository {
+            actual_fixture.0.join("notes/task.md")
+        } else {
+            actual_outside.0.join("task.md")
+        };
+        assert!(target.is_file());
+    }
+}
+
+#[test]
+fn rust_task_edit_auto_commit_matches_typescript_and_keeps_unrelated_staged_work() {
+    let expected_fixture = Fixture::new();
+    let actual_fixture = Fixture::new();
+    for fixture in [&expected_fixture, &actual_fixture] {
+        fixture.file(
+            "backlog.config.yml",
+            "project_name: CLI Fixture\ntask_prefix: task\nstatuses:\n  - To Do\n  - Done\nauto_commit: true\n",
+        );
+        fixture.file(
+            "backlog/tasks/task-1-first.md",
+            "---\nid: task-1\ntitle: First task\nstatus: To Do\ncreated_date: 2026-01-01\n---\n",
+        );
+        initialize_git_fixture(fixture);
+    }
+    let args = ["task", "edit", "task-1", "--title", "Edited task"];
+    let expected = typescript_cli(&args, &expected_fixture.0);
+    let actual = rust_cli(&args, &actual_fixture.0);
+    assert_eq!(actual.status.code(), expected.status.code());
+    assert_eq!(actual.stdout, expected.stdout);
+    assert_eq!(actual.stderr, expected.stderr);
+    assert_eq!(
+        selected_commit_result(&actual_fixture),
+        selected_commit_result(&expected_fixture)
+    );
+    assert_eq!(
+        git(&actual_fixture.0, &["log", "-1", "--format=%s"]),
+        "Update task TASK-1"
+    );
+    assert_eq!(
+        git(&actual_fixture.0, &["diff", "--cached", "--name-only"]),
+        "UNRELATED.txt"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn rust_task_edit_through_a_committed_symlink_updates_and_commits_its_target() {
+    use std::os::unix::fs::symlink;
+
+    let expected_fixture = Fixture::new();
+    let actual_fixture = Fixture::new();
+    for fixture in [&expected_fixture, &actual_fixture] {
+        fixture.file(
+            "backlog.config.yml",
+            "project_name: CLI Fixture\ntask_prefix: task\nstatuses:\n  - To Do\n  - Done\nauto_commit: true\n",
+        );
+        let task_path = fixture.0.join("backlog/tasks/task-1-linked.md");
+        let source =
+            "---\nid: task-1\ntitle: Linked task\nstatus: To Do\ncreated_date: 2026-01-01\n---\n";
+        fixture.file("backlog/tasks/task-1-linked.md", source);
+        let target = fixture.0.join("notes/task.md");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(&target, source).unwrap();
+        std::fs::remove_file(&task_path).unwrap();
+        symlink(&target, &task_path).unwrap();
+        initialize_git_fixture(fixture);
+    }
+    let args = [
+        "task",
+        "edit",
+        "task-1",
+        "--description",
+        "Edited through the link",
+    ];
+    let expected = typescript_cli(&args, &expected_fixture.0);
+    let actual = rust_cli(&args, &actual_fixture.0);
+    assert_eq!(actual.status.code(), expected.status.code());
+    assert_eq!(actual.stdout, expected.stdout);
+    assert_eq!(actual.stderr, expected.stderr);
+    assert!(
+        std::fs::symlink_metadata(actual_fixture.0.join("backlog/tasks/task-1-linked.md"))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(
+        selected_commit_result(&actual_fixture),
+        selected_commit_result(&expected_fixture)
+    );
+    assert_eq!(
+        git(&actual_fixture.0, &["diff", "--cached", "--name-only"]),
+        "UNRELATED.txt"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn rust_task_edit_through_an_uncommitted_symlink_matches_typescript() {
+    use std::os::unix::fs::symlink;
+
+    let expected_fixture = Fixture::new();
+    let actual_fixture = Fixture::new();
+    for fixture in [&expected_fixture, &actual_fixture] {
+        fixture.file(
+            "backlog.config.yml",
+            "project_name: CLI Fixture\ntask_prefix: task\nstatuses:\n  - To Do\n  - Done\nauto_commit: true\n",
+        );
+        let task_path = fixture.0.join("backlog/tasks/task-1-linked.md");
+        let contents =
+            "---\nid: task-1\ntitle: Linked task\nstatus: To Do\ncreated_date: 2026-01-01\n---\n";
+        fixture.file("backlog/tasks/task-1-linked.md", contents);
+        initialize_git_fixture(fixture);
+        let target = fixture.0.join("notes/task.md");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::rename(&task_path, &target).unwrap();
+        symlink(&target, &task_path).unwrap();
+    }
+
+    for (index, edit) in ["First edit", "Second edit"].iter().enumerate() {
+        let args = ["task", "edit", "task-1", "--description", edit];
+        let expected = typescript_cli(&args, &expected_fixture.0);
+        let actual = rust_cli(&args, &actual_fixture.0);
+        assert_eq!(
+            actual.status.code(),
+            expected.status.code(),
+            "Rust stdout: {}\nRust stderr: {}\nTypeScript stdout: {}\nTypeScript stderr: {}",
+            String::from_utf8_lossy(&actual.stdout),
+            String::from_utf8_lossy(&actual.stderr),
+            String::from_utf8_lossy(&expected.stdout),
+            String::from_utf8_lossy(&expected.stderr)
+        );
+        assert_eq!(actual.stdout, expected.stdout);
+        assert_eq!(actual.stderr, expected.stderr);
+        assert_eq!(
+            selected_commit_result(&actual_fixture),
+            selected_commit_result(&expected_fixture)
+        );
+        if index == 0 {
+            assert_eq!(
+                git(
+                    &actual_fixture.0,
+                    &["diff-tree", "--no-commit-id", "--name-status", "-r", "HEAD"]
+                ),
+                "T\tbacklog/tasks/task-1-linked.md"
+            );
+            assert_eq!(
+                git(&actual_fixture.0, &["status", "--porcelain"]),
+                "A  UNRELATED.txt\n?? notes/"
+            );
+        } else {
+            assert_eq!(
+                git(
+                    &actual_fixture.0,
+                    &["diff-tree", "--no-commit-id", "--name-status", "-r", "HEAD"]
+                ),
+                "A\tnotes/task.md"
+            );
+            assert_eq!(
+                git(&actual_fixture.0, &["status", "--porcelain"]),
+                "A  UNRELATED.txt"
+            );
         }
     }
 }
