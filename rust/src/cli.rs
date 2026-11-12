@@ -1,10 +1,13 @@
 //! Native Rust CLI for noninteractive local backlog commands.
 
 use crate::{
-    config::{Config, parse_config},
+    config::{Config, ConfigLocation, initial_config, parse_config, serialize_config},
     decision_store::DecisionStore,
     dependency_graph::{DependencyGraph, DependencyGraphNode},
-    discovery::{find_project_root, resolve_backlog_directory},
+    discovery::{
+        BacklogDirectorySource, find_project_root, normalize_backlog_directory,
+        resolve_backlog_directory, resolve_runtime_cwd,
+    },
     document_store::DocumentStore,
     draft_store::DraftStore,
     identity::{canonical_task_id, normalize_task_id, task_ids_equal},
@@ -26,7 +29,7 @@ use serde_json::{Value, json};
 use std::{
     collections::{HashMap, HashSet},
     fs,
-    io::{self, Write},
+    io::{self, IsTerminal, Write},
     path::PathBuf,
 };
 
@@ -86,6 +89,8 @@ enum Command {
         #[command(subcommand)]
         command: Option<ConfigCommand>,
     },
+    /// Initialize a Backlog.md project.
+    Init(InitArgs),
     /// Refresh shipped agent instructions.
     Agents {
         #[arg(long)]
@@ -98,6 +103,60 @@ enum ConfigCommand {
     Get { key: String },
     Set { key: String, value: String },
     List,
+}
+
+#[derive(Debug, Args)]
+struct InitArgs {
+    /// Project name; prompted when omitted.
+    project_name: Option<String>,
+    /// Comma-separated agent instruction files to create.
+    #[arg(long)]
+    agent_instructions: Option<String>,
+    /// Check task states across active branches.
+    #[arg(long)]
+    check_branches: Option<String>,
+    /// Include remote branches when checking.
+    #[arg(long)]
+    include_remote: Option<String>,
+    /// Days to consider a branch active.
+    #[arg(long)]
+    branch_days: Option<String>,
+    /// Bypass Git hooks when committing.
+    #[arg(long)]
+    bypass_git_hooks: Option<String>,
+    /// Number of digits for zero-padded IDs (0 disables).
+    #[arg(long)]
+    zero_padded_ids: Option<String>,
+    /// Default editor command.
+    #[arg(long)]
+    default_editor: Option<String>,
+    /// Default web UI port.
+    #[arg(long)]
+    web_port: Option<String>,
+    /// Automatically open the browser when starting the web UI.
+    #[arg(long)]
+    auto_open_browser: Option<String>,
+    /// Install the Claude Code agent.
+    #[arg(long)]
+    install_claude_agent: Option<String>,
+    /// AI integration mode: cli, mcp, or none.
+    #[arg(long)]
+    integration_mode: Option<String>,
+    /// Backlog folder path, relative to the project root.
+    #[arg(long)]
+    backlog_dir: Option<String>,
+    /// Config location: folder or root.
+    #[arg(long)]
+    config_location: Option<String>,
+    /// Task ID prefix; letters only.
+    #[arg(long)]
+    task_prefix: Option<String>,
+    /// Skip Git integration.
+    #[arg(long)]
+    no_git: bool,
+    /// Use default values for setup prompts.
+    #[arg(long)]
+    defaults: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -1012,6 +1071,7 @@ pub fn run() -> Result<(), String> {
             Some(ConfigCommand::List) => run_config_list(),
             None => run_config_wizard(),
         },
+        Command::Init(options) => run_init(options),
         Command::Agents {
             update_instructions,
         } => {
@@ -1947,6 +2007,120 @@ fn install_claude_agent(project_root: &std::path::Path) -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
+fn mcp_client_setup(
+    client: &str,
+) -> Option<(&'static str, &'static str, Vec<&'static str>, &'static str)> {
+    match client {
+        "claude" => Some((
+            "Claude Code",
+            "claude",
+            vec![
+                "mcp", "add", "-s", "user", "backlog", "--", "backlog", "mcp", "start",
+            ],
+            "CLAUDE.md",
+        )),
+        "codex" => Some((
+            "OpenAI Codex",
+            "codex",
+            vec!["mcp", "add", "backlog", "--", "backlog", "mcp", "start"],
+            "AGENTS.md",
+        )),
+        "gemini" => Some((
+            "Gemini CLI",
+            "gemini",
+            vec![
+                "mcp", "add", "-s", "user", "backlog", "backlog", "mcp", "start",
+            ],
+            "GEMINI.md",
+        )),
+        "kiro" => Some((
+            "Kiro",
+            "kiro-cli",
+            vec![
+                "mcp",
+                "add",
+                "--scope",
+                "global",
+                "--name",
+                "backlog",
+                "--command",
+                "backlog",
+                "--args",
+                "mcp,start",
+            ],
+            "AGENTS.md",
+        )),
+        _ => None,
+    }
+}
+
+fn open_init_url(url: &str) -> Result<(), String> {
+    let mut command = if cfg!(windows) {
+        let mut command = std::process::Command::new("cmd");
+        command.args(["/C", "start", "", url]);
+        command
+    } else if cfg!(target_os = "macos") {
+        let mut command = std::process::Command::new("open");
+        command.arg(url);
+        command
+    } else {
+        let mut command = std::process::Command::new("xdg-open");
+        command.arg(url);
+        command
+    };
+    let status = command.status().map_err(|error| error.to_string())?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("browser command exited with {status}"))
+    }
+}
+
+fn write_mcp_guidelines(root: &std::path::Path, name: &str) -> Result<(bool, bool), String> {
+    const NUDGE: &str = include_str!("../../src/guidelines/mcp/agent-nudge.md");
+    let path = root.join(name);
+    let existed = path.exists();
+    let original = if existed {
+        fs::read_to_string(&path).map_err(|error| error.to_string())?
+    } else {
+        String::new()
+    };
+    let (without_cli, cli_removed, cli_insert) = strip_managed(&original, "BACKLOG.MD GUIDELINES");
+    let (content, mcp_removed, mcp_insert) =
+        strip_managed(&without_cli, "BACKLOG.MD MCP GUIDELINES");
+    let block = format!(
+        "\n<!-- BACKLOG.MD MCP GUIDELINES START -->\n<!-- backlog.md-instructions-version: {} -->\n{}\n<!-- BACKLOG.MD MCP GUIDELINES END -->\n",
+        env!("CARGO_PKG_VERSION"),
+        NUDGE.trim()
+    );
+    let updated = if mcp_removed || cli_removed {
+        let index = mcp_insert
+            .or(cli_insert)
+            .unwrap_or(content.len())
+            .min(content.len());
+        let mut updated = content;
+        updated.insert_str(index, &block);
+        updated
+    } else if content.contains("<!-- BACKLOG.MD MCP GUIDELINES START -->") {
+        content
+    } else {
+        let mut updated = content;
+        if !updated.is_empty() && !updated.ends_with('\n') {
+            updated.push('\n');
+        }
+        updated.push_str(&block);
+        updated
+    };
+    let changed = updated != original;
+    if changed {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        }
+        fs::write(path, updated).map_err(|error| error.to_string())?;
+    }
+    Ok((!existed, changed))
+}
+
 fn install_shell_completion() -> Result<(PathBuf, String), String> {
     let shell = std::env::var("SHELL").unwrap_or_default();
     let profile_path;
@@ -2020,6 +2194,982 @@ fn install_shell_completion() -> Result<(PathBuf, String), String> {
         _ => "\nCompletions should be automatically loaded by fish.\nRestart your shell or run:\nexec fish\n\n".to_owned(),
     };
     Ok((path, instructions))
+}
+
+fn run_init(options: InitArgs) -> Result<(), String> {
+    let process_cwd = std::env::current_dir().map_err(|error| error.to_string())?;
+    let backlog_cwd = std::env::var("BACKLOG_CWD").ok();
+    let root = resolve_runtime_cwd(None, backlog_cwd.as_deref(), &process_cwd)
+        .map_err(|error| error.to_string())?
+        .path;
+    let interactive = io::stdin().is_terminal() && io::stdout().is_terminal();
+    let mut filesystem_only = options.no_git;
+    let git = crate::git::GitRepository::new(&root);
+    let mut git_enabled = git.is_repository();
+    if !git_enabled && !filesystem_only {
+        if !interactive {
+            return Err("No Git repository found and no interactive terminal is available. Run `git init` first, pass --no-git, or rerun in an interactive terminal to choose.".into());
+        }
+        if wizard_choice(
+            "No git repository found. Choose: 1 Initialize a Git repository, 2 Continue without Git",
+            1,
+            1,
+            2,
+        )? == 1
+        {
+            let output = std::process::Command::new("git")
+                .arg("init")
+                .current_dir(&root)
+                .output()
+                .map_err(|error| format!("Failed to initialize git repository: {error}"))?;
+            if !output.status.success() {
+                return Err(format!(
+                    "Failed to initialize git repository: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ));
+            }
+            git_enabled = true;
+        } else {
+            filesystem_only = true;
+        }
+    }
+
+    let initial_resolution = resolve_backlog_directory(&root);
+    let existing_config_path = initial_resolution
+        .config_path
+        .as_ref()
+        .filter(|path| path.is_file());
+    let existing_config = if let Some(path) = existing_config_path {
+        let source = fs::read_to_string(path).map_err(|error| error.to_string())?;
+        Some(parse_config(&source, path).map_err(|error| error.to_string())?)
+    } else {
+        None
+    };
+    let is_re_initialization = existing_config.is_some();
+    if is_re_initialization {
+        write_stdout(
+            "Existing backlog project detected. Current configuration will be preserved where not specified.\n",
+        )?;
+        if options.backlog_dir.is_some() {
+            return Err("The backlog directory is fixed after initialization. Re-run init without --backlog-dir for this project.".into());
+        }
+        if options.config_location.is_some() {
+            return Err("The config location is fixed after initialization. Re-run init without --config-location for this project.".into());
+        }
+    }
+
+    let is_non_interactive = options.defaults
+        || options.agent_instructions.is_some()
+        || options.check_branches.is_some()
+        || options.include_remote.is_some()
+        || options.branch_days.is_some()
+        || options.bypass_git_hooks.is_some()
+        || options.zero_padded_ids.is_some()
+        || options.default_editor.is_some()
+        || options.web_port.is_some()
+        || options.auto_open_browser.is_some()
+        || options.install_claude_agent.is_some()
+        || options.integration_mode.is_some()
+        || options.backlog_dir.is_some()
+        || options.config_location.is_some()
+        || options.task_prefix.is_some()
+        || options.no_git;
+
+    let mut project_name = options.project_name.clone().filter(|name| !name.is_empty());
+    if project_name.is_none() {
+        if !interactive {
+            return Err("Project name is required when no interactive terminal is available. Supply it with `backlog init \"My Project\" --defaults`.".into());
+        }
+        let default_name = existing_config
+            .as_ref()
+            .map(|config| config.project_name.as_str())
+            .unwrap_or("");
+        let prompt = if is_re_initialization && !default_name.is_empty() {
+            format!("Project name ({default_name}):")
+        } else {
+            "Project name:".into()
+        };
+        let entered = wizard_line(&prompt, default_name)?;
+        project_name = Some(if entered.is_empty() {
+            default_name.to_owned()
+        } else {
+            entered
+        });
+    }
+    let project_name = project_name.unwrap_or_default();
+    if project_name.trim().is_empty() {
+        return Err("Project name is required.".into());
+    }
+    if !is_non_interactive && !interactive {
+        return Err("Initialization needs an interactive terminal for setup choices. Pass --defaults to use default settings.".into());
+    }
+
+    let mut backlog_directory = initial_resolution
+        .backlog_directory
+        .clone()
+        .unwrap_or_else(|| "backlog".into());
+    let mut config_location = initial_resolution
+        .config_location
+        .unwrap_or(ConfigLocation::Folder);
+    let mut directory_source = initial_resolution
+        .source
+        .unwrap_or(BacklogDirectorySource::Backlog);
+    if !is_re_initialization {
+        if let Some(value) = options.backlog_dir.as_deref() {
+            let Some(normalized) = normalize_backlog_directory(value) else {
+                return Err("Invalid --backlog-dir value. Use 'backlog', '.backlog', or a project-relative path inside the project.".into());
+            };
+            directory_source = match normalized.as_str() {
+                "backlog" => BacklogDirectorySource::Backlog,
+                ".backlog" => BacklogDirectorySource::Hidden,
+                _ => BacklogDirectorySource::Custom,
+            };
+            backlog_directory = normalized;
+        }
+        if let Some(value) = options.config_location.as_deref() {
+            config_location = match value.trim().to_ascii_lowercase().as_str() {
+                "folder" => ConfigLocation::Folder,
+                "root" => ConfigLocation::Root,
+                _ => return Err("Invalid --config-location value. Use 'folder' or 'root'.".into()),
+            };
+        } else if directory_source == BacklogDirectorySource::Custom {
+            config_location = ConfigLocation::Root;
+        }
+        if directory_source == BacklogDirectorySource::Custom
+            && config_location != ConfigLocation::Root
+        {
+            return Err("Custom backlog directories require --config-location root.".into());
+        }
+        if !is_non_interactive {
+            let default_choice = match directory_source {
+                BacklogDirectorySource::Backlog => 1,
+                BacklogDirectorySource::Hidden => 2,
+                BacklogDirectorySource::Custom => 3,
+            };
+            let choice = wizard_choice(
+                "Where should Backlog.md store project files? Choose: 1 backlog/, 2 .backlog/, 3 Custom project-relative path",
+                default_choice,
+                1,
+                3,
+            )?;
+            if choice == 3 {
+                let entered =
+                    wizard_line("Project-relative backlog directory:", &backlog_directory)?;
+                backlog_directory = normalize_backlog_directory(&entered)
+                    .ok_or("Enter a project-relative path inside the project.")?;
+                config_location = ConfigLocation::Root;
+            } else {
+                backlog_directory = if choice == 1 { "backlog" } else { ".backlog" }.into();
+                config_location = if wizard_choice(
+                    "Where should Backlog.md store project configuration? Choose: 1 folder config.yml, 2 root backlog.config.yml",
+                    if config_location == ConfigLocation::Root {
+                        2
+                    } else {
+                        1
+                    },
+                    1,
+                    2,
+                )? == 1
+                {
+                    ConfigLocation::Folder
+                } else {
+                    ConfigLocation::Root
+                };
+            }
+        }
+    }
+
+    let mut task_prefix = options
+        .task_prefix
+        .clone()
+        .filter(|prefix| !prefix.is_empty())
+        .unwrap_or_else(|| "task".into());
+    if !is_re_initialization && !is_non_interactive {
+        task_prefix = wizard_line("Task prefix (default: task):", "")?;
+        if task_prefix.is_empty() {
+            task_prefix = "task".into();
+        }
+    }
+    if let Some(error) = task_prefix_error(&task_prefix) {
+        return Err(error);
+    }
+
+    let mut integration_mode = options
+        .integration_mode
+        .as_deref()
+        .map(normalize_init_integration_mode)
+        .transpose()?
+        .unwrap_or_else(|| "cli".into());
+    if !is_non_interactive {
+        integration_mode = match wizard_choice(
+            "How would you like your AI tools to connect to Backlog.md? Choose: 1 CLI instructions, 2 MCP connector, 3 Skip for now",
+            1,
+            1,
+            3,
+        )? {
+            1 => "cli",
+            2 => "mcp",
+            _ => "none",
+        }
+        .into();
+    }
+    if integration_mode != "cli"
+        && (options.agent_instructions.is_some() || options.install_claude_agent.is_some())
+    {
+        let message = if integration_mode == "mcp" {
+            "The MCP connector option cannot be combined with --agent-instructions or --install-claude-agent."
+        } else {
+            "Skipping AI integration cannot be combined with --agent-instructions or --install-claude-agent."
+        };
+        return Err(message.into());
+    }
+
+    let mut mcp_client_setup_summary = None;
+    if integration_mode == "mcp" {
+        if is_non_interactive {
+            mcp_client_setup_summary = Some("skipped (non-interactive)".to_owned());
+        } else {
+            write_stdout("MCP server name: backlog\n")?;
+            let selected_clients = loop {
+                let answer = wizard_line(
+                    "Which AI tools should we configure right now? (comma-separated: claude, codex, gemini, kiro, guide):",
+                    "",
+                )?;
+                let mut clients = Vec::new();
+                let mut valid = true;
+                for client in answer
+                    .split(',')
+                    .map(|client| client.trim().to_ascii_lowercase())
+                {
+                    if client.is_empty() {
+                        continue;
+                    }
+                    if !["claude", "codex", "gemini", "kiro", "guide"].contains(&client.as_str()) {
+                        write_stderr(&format!(
+                            "Invalid MCP client: {client}. Choose claude, codex, gemini, kiro, or guide.\n"
+                        ))?;
+                        valid = false;
+                        break;
+                    }
+                    if !clients.contains(&client) {
+                        clients.push(client);
+                    }
+                }
+                if !valid {
+                    continue;
+                }
+                if clients.is_empty() {
+                    write_stdout("Please select at least one AI tool before continuing.\n")?;
+                    continue;
+                }
+                break clients;
+            };
+
+            const GUIDE_URL: &str =
+                "https://github.com/MrLesk/Backlog.md#-mcp-integration-model-context-protocol";
+            let mut setup_results = Vec::new();
+            let mut reminder_files = Vec::new();
+            let mut created_reminders = Vec::new();
+            let mut updated_reminders = Vec::new();
+            for client in selected_clients {
+                if client == "guide" {
+                    write_stdout("Opening MCP setup guide in your browser...\n")?;
+                    if let Err(error) = open_init_url(GUIDE_URL) {
+                        write_stderr(&format!(
+                            "Unable to open the MCP setup guide automatically ({error}). Please visit {GUIDE_URL}\n"
+                        ))?;
+                    }
+                    setup_results.push("Setup guide opened".to_owned());
+                    reminder_files.push("AGENTS.md".to_owned());
+                    continue;
+                }
+
+                let (label, command, arguments, reminder) = mcp_client_setup(&client)
+                    .ok_or_else(|| format!("Unsupported MCP client selection: {client}"))?;
+                write_stdout(&format!("Configuring {label}...\n"))?;
+                let result = match std::process::Command::new(command)
+                    .args(&arguments)
+                    .status()
+                {
+                    Ok(status) if status.success() => {
+                        write_stdout(&format!("Added Backlog MCP server to {label}\n"))?;
+                        label.to_owned()
+                    }
+                    Ok(status) => {
+                        let manual = format!("{command} {}", arguments.join(" "));
+                        write_stderr(&format!(
+                            "Unable to configure {label} automatically (command exited with {status}).\nRun manually: {manual}\n"
+                        ))?;
+                        format!("{label} (manual setup required)")
+                    }
+                    Err(error) => {
+                        let manual = format!("{command} {}", arguments.join(" "));
+                        write_stderr(&format!(
+                            "Unable to configure {label} automatically ({error}).\nRun manually: {manual}\n"
+                        ))?;
+                        format!("{label} (manual setup required)")
+                    }
+                };
+                setup_results.push(result);
+                reminder_files.push(reminder.to_owned());
+            }
+            let mut unique_reminders = Vec::new();
+            for file in reminder_files {
+                if !unique_reminders.contains(&file) {
+                    unique_reminders.push(file);
+                }
+            }
+            for file in unique_reminders {
+                let (created, changed) = write_mcp_guidelines(&root, &file)?;
+                if changed {
+                    if created {
+                        created_reminders.push(file);
+                    } else {
+                        updated_reminders.push(file);
+                    }
+                }
+            }
+            if !created_reminders.is_empty() {
+                write_stdout(&format!(
+                    "Created MCP reminder file(s): {}\n",
+                    created_reminders.join(", ")
+                ))?;
+            }
+            if !updated_reminders.is_empty() {
+                write_stdout(&format!(
+                    "Added MCP reminder to {}\n",
+                    updated_reminders.join(", ")
+                ))?;
+            }
+            mcp_client_setup_summary = Some(setup_results.join(", "));
+        }
+    }
+
+    let mut agent_files = Vec::new();
+    let mut agent_skipped = false;
+    if integration_mode == "cli" {
+        if let Some(selection) = options.agent_instructions.as_deref() {
+            (agent_files, agent_skipped) = parse_init_agent_selection(selection)?;
+        } else if is_non_interactive {
+            agent_files.push("AGENTS.md".to_owned());
+        } else {
+            loop {
+                let selection = wizard_line(
+                    "Select instruction files for CLI-based AI tools (comma-separated; CLAUDE.md, AGENTS.md, GEMINI.md, .github/copilot-instructions.md; 'none' skips):",
+                    "",
+                )?;
+                if selection.is_empty() {
+                    write_stderr(
+                        "Select at least one instruction file, or enter 'none' to skip.\n",
+                    )?;
+                    continue;
+                }
+                (agent_files, agent_skipped) = parse_init_agent_selection(&selection)?;
+                break;
+            }
+        }
+    }
+
+    let existing = existing_config.as_ref();
+    let mut check_active_branches = existing
+        .and_then(|config| config.check_active_branches)
+        .unwrap_or(true);
+    let mut remote_operations = existing
+        .and_then(|config| config.remote_operations)
+        .unwrap_or(true);
+    let mut active_branch_days = existing
+        .and_then(|config| config.active_branch_days)
+        .unwrap_or(30.0);
+    let mut bypass_git_hooks = existing
+        .and_then(|config| config.bypass_git_hooks)
+        .unwrap_or(false);
+    let mut auto_commit = existing
+        .and_then(|config| config.auto_commit)
+        .unwrap_or(false);
+    let mut zero_padded_ids = existing.and_then(|config| config.zero_padded_ids);
+    let mut default_editor = existing
+        .and_then(|config| config.default_editor.clone())
+        .or_else(|| {
+            if is_re_initialization {
+                None
+            } else {
+                std::env::var("EDITOR")
+                    .ok()
+                    .filter(|editor| !editor.is_empty())
+                    .or_else(|| {
+                        std::env::var("VISUAL")
+                            .ok()
+                            .filter(|editor| !editor.is_empty())
+                    })
+            }
+        });
+    let mut default_port = existing
+        .and_then(|config| config.default_port)
+        .unwrap_or(6420.0);
+    let mut auto_open_browser = existing
+        .and_then(|config| config.auto_open_browser)
+        .unwrap_or(true);
+    let mut definition_of_done = existing
+        .and_then(|config| config.definition_of_done.clone())
+        .unwrap_or_default();
+    let mut advanced_configured = false;
+    let mut install_completions = false;
+    let mut should_install_claude_agent = integration_mode == "cli"
+        && parse_init_bool(options.install_claude_agent.as_deref(), false);
+    if !is_non_interactive
+        && wizard_confirm(
+            "Configure advanced settings now? (Runs the advanced backlog config wizard)",
+            false,
+        )?
+    {
+        advanced_configured = true;
+        install_completions = wizard_confirm("Install shell completions now?", true)?;
+        check_active_branches = wizard_confirm(
+            "Check task states across active branches?",
+            check_active_branches,
+        )?;
+        if check_active_branches {
+            remote_operations =
+                wizard_confirm("Check task states in remote branches?", remote_operations)?;
+            active_branch_days = wizard_number(
+                "How many days should a branch be considered active?",
+                active_branch_days,
+                1.0,
+                365.0,
+            )?;
+        } else {
+            remote_operations = false;
+        }
+        bypass_git_hooks = wizard_confirm("Bypass git hooks when committing?", bypass_git_hooks)?;
+        auto_commit = wizard_confirm(
+            "Enable automatic commits for Backlog operations?",
+            auto_commit,
+        )?;
+        zero_padded_ids = if wizard_confirm(
+            "Enable zero-padded IDs for consistent formatting?",
+            zero_padded_ids.unwrap_or(0.0) > 0.0,
+        )? {
+            Some(wizard_number(
+                "Number of digits for zero-padding:",
+                zero_padded_ids.unwrap_or(3.0),
+                1.0,
+                10.0,
+            )?)
+        } else {
+            None
+        };
+        let editor_initial = default_editor.clone().unwrap_or_else(|| {
+            if is_re_initialization {
+                String::new()
+            } else if cfg!(windows) {
+                "notepad".into()
+            } else if cfg!(unix) {
+                "nano".into()
+            } else {
+                "vi".into()
+            }
+        });
+        let entered_editor = wizard_line(
+            "Default editor command (leave blank to use system default):",
+            &editor_initial,
+        )?;
+        let editor_value = if entered_editor.is_empty() {
+            editor_initial
+        } else {
+            entered_editor
+        };
+        default_editor = if editor_value.is_empty() {
+            None
+        } else if editor_exists(&editor_value)
+            || wizard_confirm("Editor not found. Set it anyway?", false)?
+        {
+            Some(editor_value)
+        } else {
+            None
+        };
+        loop {
+            let preview = if definition_of_done.is_empty() {
+                "(none)".to_owned()
+            } else {
+                definition_of_done
+                    .iter()
+                    .enumerate()
+                    .map(|(index, item)| format!("{}. {item}", index + 1))
+                    .collect::<Vec<_>>()
+                    .join(" | ")
+            };
+            let actions = if definition_of_done.is_empty() {
+                vec![1, 5]
+            } else if definition_of_done.len() == 1 {
+                vec![1, 2, 4, 5]
+            } else {
+                vec![1, 2, 3, 4, 5]
+            };
+            let selected_action = loop {
+                let default_action = if definition_of_done.is_empty() { 1 } else { 5 };
+                let choices = actions
+                    .iter()
+                    .map(|action| match action {
+                        1 => "1 Add",
+                        2 => "2 Remove",
+                        3 => "3 Reorder",
+                        4 => "4 Clear",
+                        _ => "5 Done",
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let value = wizard_line(
+                    &format!("Edit Definition of Done defaults: {preview}\nChoose: {choices}"),
+                    &default_action.to_string(),
+                )?;
+                let action = if value.is_empty() {
+                    Some(default_action)
+                } else {
+                    value.parse::<usize>().ok()
+                };
+                if let Some(action) = action
+                    && actions.contains(&action)
+                {
+                    break action;
+                }
+                write_stderr("Choose one of the available actions.\n")?;
+            };
+            match selected_action {
+                1 => {
+                    let item = wizard_text("New Definition of Done item:", "")?;
+                    if !item.is_empty() {
+                        definition_of_done.push(item);
+                    }
+                }
+                2 => {
+                    let index = wizard_choice(
+                        &format!("Remove which item number (1-{})?", definition_of_done.len()),
+                        definition_of_done.len(),
+                        1,
+                        definition_of_done.len(),
+                    )? - 1;
+                    definition_of_done.remove(index);
+                }
+                3 => {
+                    let from = wizard_choice(
+                        &format!("Move which item number (1-{})?", definition_of_done.len()),
+                        definition_of_done.len(),
+                        1,
+                        definition_of_done.len(),
+                    )? - 1;
+                    let to = wizard_choice(
+                        &format!("Move to which position (1-{})?", definition_of_done.len()),
+                        1,
+                        1,
+                        definition_of_done.len(),
+                    )? - 1;
+                    if from != to {
+                        let item = definition_of_done.remove(from);
+                        definition_of_done.insert(to, item);
+                    }
+                }
+                4 => {
+                    if wizard_confirm("Clear all Definition of Done defaults?", false)? {
+                        definition_of_done.clear();
+                    }
+                }
+                _ => break,
+            }
+        }
+        if wizard_confirm("Configure web UI settings now?", false)? {
+            default_port = wizard_number("Default web UI port:", default_port, 1.0, 65535.0)?;
+            auto_open_browser = wizard_confirm(
+                "Automatically open browser when starting web UI?",
+                auto_open_browser,
+            )?;
+        }
+        if integration_mode == "cli" {
+            should_install_claude_agent =
+                wizard_confirm("Install Claude Code Backlog.md agent?", false)?;
+        }
+    }
+    if let Some(value) = options.check_branches.as_deref() {
+        check_active_branches = parse_init_bool(Some(value), check_active_branches);
+    }
+    if check_active_branches {
+        if let Some(value) = options.include_remote.as_deref() {
+            remote_operations = parse_init_bool(Some(value), remote_operations);
+        }
+        if let Some(value) = options.branch_days.as_deref() {
+            active_branch_days = parse_init_int(Some(value), active_branch_days);
+        }
+    } else {
+        remote_operations = false;
+    }
+    if let Some(value) = options.bypass_git_hooks.as_deref() {
+        bypass_git_hooks = parse_init_bool(Some(value), bypass_git_hooks);
+    }
+    if let Some(value) = options.zero_padded_ids.as_deref() {
+        let width = parse_init_int(Some(value), zero_padded_ids.unwrap_or(0.0));
+        zero_padded_ids = (width > 0.0).then_some(width);
+    }
+    if let Some(value) = options.default_editor.as_ref() {
+        default_editor = (!value.is_empty()).then(|| value.clone());
+    }
+    if let Some(value) = options.web_port.as_deref() {
+        default_port = parse_init_int(Some(value), default_port);
+    }
+    if let Some(value) = options.auto_open_browser.as_deref() {
+        auto_open_browser = parse_init_bool(Some(value), auto_open_browser);
+    }
+    if filesystem_only {
+        check_active_branches = false;
+        remote_operations = false;
+        bypass_git_hooks = false;
+        auto_commit = false;
+    }
+    if existing.is_some_and(|config| config.filesystem_only == Some(true)) {
+        filesystem_only = true;
+        check_active_branches = false;
+        remote_operations = false;
+        bypass_git_hooks = false;
+        auto_commit = false;
+    }
+
+    let task_prefix = existing
+        .and_then(|config| config.task_prefix.as_deref())
+        .unwrap_or(&task_prefix);
+    let mut config = if let Some(existing) = existing {
+        existing.clone()
+    } else {
+        initial_config(&project_name, Some(task_prefix), filesystem_only)?
+    };
+    config.project_name = project_name.clone();
+    config.filesystem_only = Some(filesystem_only);
+    config.check_active_branches = Some(check_active_branches);
+    config.remote_operations = Some(remote_operations);
+    config.active_branch_days = Some(active_branch_days);
+    config.bypass_git_hooks = Some(bypass_git_hooks);
+    config.auto_commit = Some(auto_commit);
+    config.default_port = Some(default_port);
+    config.auto_open_browser = Some(auto_open_browser);
+    config.task_prefix = Some(task_prefix.to_owned());
+    config.default_editor = default_editor;
+    config.zero_padded_ids = zero_padded_ids;
+    if advanced_configured {
+        config.definition_of_done = if definition_of_done.is_empty() {
+            None
+        } else {
+            Some(definition_of_done.clone())
+        };
+    }
+    config.backlog_directory =
+        (config_location == ConfigLocation::Root).then(|| backlog_directory.clone());
+
+    let backlog_path = root.join(&backlog_directory);
+    if !is_re_initialization {
+        for directory in [
+            "tasks",
+            "drafts",
+            "archive/tasks",
+            "archive/drafts",
+            "milestones",
+            "archive/milestones",
+            "docs",
+            "decisions",
+        ] {
+            fs::create_dir_all(backlog_path.join(directory)).map_err(|error| error.to_string())?;
+        }
+    }
+    let config_path = existing_config_path.cloned().unwrap_or_else(|| {
+        if config_location == ConfigLocation::Root {
+            root.join("backlog.config.yml")
+        } else {
+            backlog_path.join("config.yml")
+        }
+    });
+    if let Some(parent) = config_path.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    fs::write(
+        &config_path,
+        serialize_config(&config, config_location, &backlog_directory),
+    )
+    .map_err(|error| error.to_string())?;
+
+    let agent_results = write_init_agent_instructions(&root, &agent_files)?;
+    if auto_commit && !filesystem_only && !agent_results.1.is_empty() {
+        let context = ProjectContext {
+            root: root.clone(),
+            backlog_directory: PathBuf::from(&backlog_directory),
+            config_path: Some(config_path.clone()),
+            config: config.clone(),
+            store: TaskStore::new(&root, &backlog_path, task_prefix),
+            prefix: task_prefix.to_owned(),
+        };
+        commit_record_change(&context, "Add AI agent instructions", &agent_results.1)?;
+    }
+    if should_install_claude_agent {
+        install_claude_agent(&root)?;
+    }
+
+    let ai_summary = match integration_mode.as_str() {
+        "cli" => "CLI instructions",
+        "mcp" => "MCP connector",
+        _ => "skipped (configure later via `backlog init`)",
+    };
+    let completion_summary = if install_completions {
+        match install_shell_completion() {
+            Ok((path, instructions)) => {
+                write_stdout(&format!(
+                    "Shell completions installed to {}\n{}",
+                    path.display(),
+                    instructions
+                ))?;
+                format!("installed to {}", path.display())
+            }
+            Err(error) => {
+                write_stderr(&format!("Warning: {error}\n"))?;
+                "installation failed (see warning below)".into()
+            }
+        }
+    } else if advanced_configured {
+        "skipped".into()
+    } else {
+        "not configured".into()
+    };
+    write_stdout("Initialization Summary\n")?;
+    write_stdout(&format!("Project Name: {project_name}\n"))?;
+    write_stdout(&format!("Backlog directory: {backlog_directory}\n"))?;
+    write_stdout(&format!(
+        "Config location: {}\n",
+        if config_location == ConfigLocation::Root {
+            "backlog.config.yml"
+        } else {
+            "folder config.yml"
+        }
+    ))?;
+    write_stdout(&format!(
+        "Git integration: {}\n",
+        if filesystem_only {
+            "disabled (filesystem-only)"
+        } else if git_enabled {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    ))?;
+    write_stdout(&format!("AI Integration: {ai_summary}\n"))?;
+    if integration_mode == "cli" {
+        if agent_files.is_empty() {
+            write_stdout(&format!(
+                "Agent instructions: {}\n",
+                if agent_skipped { "skipped" } else { "none" }
+            ))?;
+        } else {
+            write_stdout(&format!("Agent instructions: {}\n", agent_files.join(", ")))?;
+        }
+    } else if integration_mode == "mcp" {
+        write_stdout(&format!(
+            "Agent instruction files: guidance is provided through the MCP connector.\nMCP server name: backlog\nMCP client setup: {}\n",
+            mcp_client_setup_summary.as_deref().unwrap_or("skipped")
+        ))?;
+    }
+    write_stdout(&format!("Shell completions: {completion_summary}\n"))?;
+    if advanced_configured || filesystem_only {
+        write_stdout("Advanced settings:\n")?;
+        write_stdout(&format!(
+            "  Check active branches: {check_active_branches}\n"
+        ))?;
+        write_stdout(&format!("  Remote operations: {remote_operations}\n"))?;
+        write_stdout(&format!(
+            "  Active branch days: {}\n",
+            num_string(active_branch_days)
+        ))?;
+        write_stdout(&format!("  Bypass git hooks: {bypass_git_hooks}\n"))?;
+        write_stdout(&format!("  Auto commit: {auto_commit}\n"))?;
+        write_stdout(&format!(
+            "  Zero-padded IDs: {}\n",
+            zero_padded_ids.map_or_else(
+                || "disabled".into(),
+                |width| format!("{} digits", num_string(width))
+            )
+        ))?;
+        write_stdout(&format!("  Web UI port: {}\n", num_string(default_port)))?;
+        write_stdout(&format!("  Auto open browser: {auto_open_browser}\n"))?;
+        if let Some(editor) = &config.default_editor {
+            write_stdout(&format!("  Default editor: {editor}\n"))?;
+        }
+        write_stdout(&format!(
+            "  Definition of Done defaults: {}\n",
+            if definition_of_done.is_empty() {
+                "none".into()
+            } else {
+                definition_of_done.join(" | ")
+            }
+        ))?;
+    } else {
+        write_stdout("Advanced settings: unchanged (run `backlog config` to customize)\n")?;
+    }
+    if is_re_initialization {
+        write_stdout(&format!(
+            "Updated backlog project configuration: {project_name}\n"
+        ))?;
+    } else {
+        write_stdout(&format!("Initialized backlog project: {project_name}\n"))?;
+    }
+    if integration_mode == "cli" {
+        if let Some(message) = agent_results.0 {
+            write_stdout(&format!("{message}\n"))?;
+        } else if agent_skipped {
+            write_stdout("Skipping agent instruction files per selection.\n")?;
+        }
+        if should_install_claude_agent {
+            write_stdout("Claude Code Backlog.md agent Installed to .claude/agents/\n")?;
+        }
+    }
+    Ok(())
+}
+
+fn normalize_init_integration_mode(value: &str) -> Result<String, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "cli" | "instructions" | "agent-instructions" | "local" => Ok("cli".into()),
+        "mcp" | "connector" | "server" | "remote" => Ok("mcp".into()),
+        "none" | "skip" | "manual" | "later" | "no" | "off" => Ok("none".into()),
+        _ => Err(format!(
+            "Invalid integration mode: {value}. Valid options are: mcp, cli, none"
+        )),
+    }
+}
+
+fn task_prefix_error(prefix: &str) -> Option<String> {
+    if prefix.is_empty() {
+        return None;
+    }
+    if !prefix.bytes().all(|byte| byte.is_ascii_alphabetic()) {
+        return Some("Task prefix must contain only letters (a-z, A-Z).".into());
+    }
+    if ["draft", "doc", "decision"]
+        .iter()
+        .any(|reserved| prefix.eq_ignore_ascii_case(reserved))
+    {
+        return Some(format!(
+            "Task prefix \"{prefix}\" is reserved for drafts, docs, or decisions. Choose a different prefix."
+        ));
+    }
+    None
+}
+
+fn parse_init_agent_selection(value: &str) -> Result<(Vec<String>, bool), String> {
+    let mut selected = Vec::new();
+    let mut skip = false;
+    for instruction in value
+        .split(',')
+        .map(|item| item.trim().to_ascii_lowercase())
+    {
+        let file = match instruction.as_str() {
+            "cursor" | "agents" | "agents.md" => Some("AGENTS.md"),
+            "claude" | "claude.md" => Some("CLAUDE.md"),
+            "gemini" | "gemini.md" => Some("GEMINI.md"),
+            "copilot" | ".github/copilot-instructions.md" => {
+                Some(".github/copilot-instructions.md")
+            }
+            "none" => {
+                skip = true;
+                None
+            }
+            "" => None,
+            _ => {
+                return Err(format!(
+                    "Invalid agent instruction: {instruction}\nValid options are: cursor, claude, agents, gemini, copilot, none"
+                ));
+            }
+        };
+        if let Some(file) = file
+            && !selected.iter().any(|current| current == file)
+        {
+            selected.push(file.to_owned());
+        }
+    }
+    let skipped = selected.is_empty() && skip;
+    if selected.is_empty() && !skipped {
+        return Err("Please select at least one agent instruction file before continuing.".into());
+    }
+    Ok((selected, skipped))
+}
+
+fn parse_init_bool(value: Option<&str>, default: bool) -> bool {
+    value.map_or(default, |value| {
+        value.eq_ignore_ascii_case("true") || value == "1"
+    })
+}
+
+fn parse_init_int(value: Option<&str>, default: f64) -> f64 {
+    value
+        .and_then(parse_int_prefix)
+        .map(|value| value as f64)
+        .unwrap_or(default)
+}
+
+fn write_init_agent_instructions(
+    root: &std::path::Path,
+    selected: &[String],
+) -> Result<(Option<String>, Vec<PathBuf>), String> {
+    const NUDGE: &str = include_str!("../../src/guidelines/cli-agent-nudge.md");
+    let version = env!("CARGO_PKG_VERSION");
+    let mut actions: Vec<(&str, Vec<String>)> = vec![
+        ("Created", Vec::new()),
+        ("Updated", Vec::new()),
+        ("Unchanged", Vec::new()),
+    ];
+    let mut changed_paths = Vec::new();
+    for name in selected {
+        let path = root.join(name);
+        let existed = path.exists();
+        let original = if existed {
+            fs::read_to_string(&path).map_err(|error| error.to_string())?
+        } else {
+            String::new()
+        };
+        let (without_mcp, _, _) = strip_managed(&original, "BACKLOG.MD MCP GUIDELINES");
+        let (content, removed, insertion) = strip_managed(&without_mcp, "BACKLOG.MD GUIDELINES");
+        let block = format!(
+            "\n<!-- BACKLOG.MD GUIDELINES START -->\n<!-- backlog.md-instructions-version: {version} -->\n{}\n<!-- BACKLOG.MD GUIDELINES END -->\n",
+            NUDGE.trim()
+        );
+        let updated = if removed {
+            let index = insertion.unwrap_or(content.len()).min(content.len());
+            let mut updated = content;
+            updated.insert_str(index, &block);
+            updated
+        } else if content.contains("<!-- BACKLOG.MD GUIDELINES START -->") {
+            content
+        } else {
+            let mut updated = content;
+            if !updated.is_empty() && !updated.ends_with('\n') {
+                updated.push('\n');
+            }
+            updated.push_str(&block);
+            updated
+        };
+        let action_index = if updated == original {
+            2
+        } else if existed {
+            1
+        } else {
+            0
+        };
+        actions[action_index].1.push(name.clone());
+        if updated != original {
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+            }
+            fs::write(&path, updated).map_err(|error| error.to_string())?;
+            changed_paths.push(path);
+        }
+    }
+    let summary = actions
+        .into_iter()
+        .filter(|(_, names)| !names.is_empty())
+        .map(|(action, names)| format!("{action}: {}", names.join(", ")))
+        .collect::<Vec<_>>()
+        .join("\n");
+    Ok(((!summary.is_empty()).then_some(summary), changed_paths))
 }
 
 fn config_display(c: &Config, key: &str) -> String {

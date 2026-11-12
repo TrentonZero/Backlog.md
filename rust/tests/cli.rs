@@ -3430,6 +3430,759 @@ fn rust_config_migration_skips_init_help_and_version_invocations() {
 }
 
 #[test]
+fn rust_init_creates_a_default_filesystem_only_project() {
+    let reference = Fixture::new();
+    let candidate = Fixture::new();
+    for fixture in [&reference, &candidate] {
+        std::fs::remove_file(fixture.0.join("backlog.config.yml")).unwrap();
+    }
+    let args = [
+        "init",
+        "New Project",
+        "--no-git",
+        "--defaults",
+        "--integration-mode",
+        "none",
+    ];
+    let expected = typescript_cli(&args, &reference.0);
+    let actual = rust_cli(&args, &candidate.0);
+    assert_eq!(
+        actual.status.code(),
+        expected.status.code(),
+        "{}",
+        String::from_utf8_lossy(&actual.stderr)
+    );
+    assert_eq!(actual.status.code(), Some(0));
+    assert!(
+        String::from_utf8_lossy(&actual.stdout)
+            .contains("Initialized backlog project: New Project")
+    );
+    assert!(!candidate.0.join(".git").exists());
+    for path in [
+        "backlog/tasks",
+        "backlog/drafts",
+        "backlog/archive/tasks",
+        "backlog/archive/drafts",
+        "backlog/milestones",
+        "backlog/archive/milestones",
+        "backlog/docs",
+        "backlog/decisions",
+    ] {
+        assert!(candidate.0.join(path).is_dir(), "missing {path}");
+    }
+    let expected_config = std::fs::read_to_string(reference.0.join("backlog/config.yml")).unwrap();
+    let actual_config = std::fs::read_to_string(candidate.0.join("backlog/config.yml")).unwrap();
+    let expected: serde_json::Value = serde_yaml_ng::from_str(&expected_config).unwrap();
+    let actual: serde_json::Value = serde_yaml_ng::from_str(&actual_config).unwrap();
+    assert_eq!(actual, expected);
+}
+
+#[test]
+fn rust_init_requires_a_project_name_and_explicit_no_git_choice_without_git() {
+    for args in [
+        vec!["init", "--no-git", "--defaults"],
+        vec![
+            "init",
+            "Project",
+            "--defaults",
+            "--integration-mode",
+            "none",
+        ],
+    ] {
+        let reference = Fixture::new();
+        let candidate = Fixture::new();
+        for fixture in [&reference, &candidate] {
+            std::fs::remove_file(fixture.0.join("backlog.config.yml")).unwrap();
+        }
+        let expected = typescript_cli(&args, &reference.0);
+        let actual = rust_cli(&args, &candidate.0);
+        assert_eq!(actual.status.code(), expected.status.code(), "{args:?}");
+        assert_eq!(actual.status.code(), Some(1), "{args:?}");
+        let output = String::from_utf8_lossy(&actual.stdout).to_string()
+            + &String::from_utf8_lossy(&actual.stderr);
+        assert_eq!(
+            output.contains("Project name is required"),
+            args.len() == 3,
+            "{args:?}: {output}"
+        );
+        assert!(!candidate.0.join("backlog").exists(), "{args:?}");
+        assert!(!candidate.0.join(".git").exists(), "{args:?}");
+    }
+}
+
+#[test]
+fn rust_init_supports_root_and_custom_backlog_directories() {
+    for (args, config_path, backlog_path) in [
+        (
+            vec![
+                "init",
+                "Root Config",
+                "--no-git",
+                "--defaults",
+                "--integration-mode",
+                "none",
+                "--config-location",
+                "root",
+            ],
+            "backlog.config.yml",
+            "backlog/tasks",
+        ),
+        (
+            vec![
+                "init",
+                "Custom Backlog",
+                "--no-git",
+                "--defaults",
+                "--integration-mode",
+                "none",
+                "--backlog-dir",
+                "planning/backlog-data",
+            ],
+            "backlog.config.yml",
+            "planning/backlog-data/tasks",
+        ),
+    ] {
+        let reference = Fixture::new();
+        let candidate = Fixture::new();
+        for fixture in [&reference, &candidate] {
+            std::fs::remove_file(fixture.0.join("backlog.config.yml")).unwrap();
+        }
+        let expected = typescript_cli(&args, &reference.0);
+        let actual = rust_cli(&args, &candidate.0);
+        assert_eq!(
+            actual.status.code(),
+            expected.status.code(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&actual.stderr)
+        );
+        assert_eq!(actual.status.code(), Some(0), "{args:?}");
+        let expected_config = std::fs::read_to_string(reference.0.join(config_path)).unwrap();
+        let actual_config = std::fs::read_to_string(candidate.0.join(config_path)).unwrap();
+        let expected: serde_json::Value = serde_yaml_ng::from_str(&expected_config).unwrap();
+        let actual: serde_json::Value = serde_yaml_ng::from_str(&actual_config).unwrap();
+        assert_eq!(actual, expected, "{args:?}");
+        assert!(candidate.0.join(backlog_path).is_dir(), "{args:?}");
+    }
+}
+
+#[test]
+fn rust_init_uses_backlog_cwd_and_supports_existing_git_repositories() {
+    let reference = Fixture::new();
+    let candidate = Fixture::new();
+    for fixture in [&reference, &candidate] {
+        std::fs::remove_file(fixture.0.join("backlog.config.yml")).unwrap();
+        let output = Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&fixture.0)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+    }
+    let args = [
+        "init",
+        "Git Project",
+        "--defaults",
+        "--integration-mode",
+        "none",
+    ];
+    let expected = typescript_cli(&args, &reference.0);
+    let actual = rust_cli(&args, &candidate.0);
+    assert_eq!(actual.status.code(), expected.status.code());
+    assert_eq!(actual.status.code(), Some(0));
+    let expected: serde_json::Value = serde_yaml_ng::from_str(
+        &std::fs::read_to_string(reference.0.join("backlog/config.yml")).unwrap(),
+    )
+    .unwrap();
+    let actual: serde_json::Value = serde_yaml_ng::from_str(
+        &std::fs::read_to_string(candidate.0.join("backlog/config.yml")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(actual, expected);
+
+    let cwd_reference = Fixture::new();
+    let cwd_candidate = Fixture::new();
+    for fixture in [&cwd_reference, &cwd_candidate] {
+        std::fs::remove_file(fixture.0.join("backlog.config.yml")).unwrap();
+    }
+    let reference_parent = Fixture::new();
+    let candidate_parent = Fixture::new();
+    let expected =
+        Command::new(std::env::var_os("BACKLOG_REFERENCE_BUN").unwrap_or_else(|| "bun".into()))
+            .arg(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("src/cli.ts"),
+            )
+            .args([
+                "init",
+                "Cwd Project",
+                "--no-git",
+                "--defaults",
+                "--integration-mode",
+                "none",
+            ])
+            .current_dir(&reference_parent.0)
+            .env("BACKLOG_CWD", &cwd_reference.0)
+            .output()
+            .unwrap();
+    let actual = Command::new(env!("CARGO_BIN_EXE_backlog"))
+        .args([
+            "init",
+            "Cwd Project",
+            "--no-git",
+            "--defaults",
+            "--integration-mode",
+            "none",
+        ])
+        .current_dir(&candidate_parent.0)
+        .env("BACKLOG_CWD", &cwd_candidate.0)
+        .output()
+        .unwrap();
+    assert_eq!(actual.status.code(), expected.status.code());
+    assert_eq!(actual.status.code(), Some(0));
+    assert!(cwd_candidate.0.join("backlog/tasks").is_dir());
+    assert!(!candidate_parent.0.join("backlog").exists());
+}
+
+#[test]
+fn rust_init_rejects_incompatible_integration_options_like_typescript() {
+    for args in [
+        [
+            "init",
+            "Project",
+            "--no-git",
+            "--defaults",
+            "--integration-mode",
+            "none",
+            "--agent-instructions",
+            "AGENTS.md",
+        ]
+        .as_slice(),
+        [
+            "init",
+            "Project",
+            "--no-git",
+            "--defaults",
+            "--integration-mode",
+            "invalid",
+        ]
+        .as_slice(),
+    ] {
+        let reference = Fixture::new();
+        let candidate = Fixture::new();
+        for fixture in [&reference, &candidate] {
+            std::fs::remove_file(fixture.0.join("backlog.config.yml")).unwrap();
+        }
+        let expected = typescript_cli(args, &reference.0);
+        let actual = rust_cli(args, &candidate.0);
+        assert_eq!(actual.status.code(), expected.status.code(), "{args:?}");
+        assert_ne!(actual.status.code(), Some(0), "{args:?}");
+        assert!(!candidate.0.join("backlog").exists(), "{args:?}");
+    }
+}
+
+#[test]
+fn rust_init_integration_modes_match_typescript_file_side_effects() {
+    for (mode, selection, expected_files) in [
+        (
+            "cli",
+            Some("agents,claude,copilot"),
+            vec!["AGENTS.md", "CLAUDE.md", ".github/copilot-instructions.md"],
+        ),
+        ("mcp", None, vec![]),
+        ("none", None, vec![]),
+    ] {
+        let reference = Fixture::new();
+        let candidate = Fixture::new();
+        for fixture in [&reference, &candidate] {
+            std::fs::remove_file(fixture.0.join("backlog.config.yml")).unwrap();
+        }
+        let mut args = vec![
+            "init",
+            "Integration Project",
+            "--no-git",
+            "--defaults",
+            "--integration-mode",
+            mode,
+        ];
+        if let Some(selection) = selection {
+            args.extend(["--agent-instructions", selection]);
+        }
+        let expected = typescript_cli(&args, &reference.0);
+        let actual = rust_cli(&args, &candidate.0);
+        assert_eq!(actual.status.code(), expected.status.code(), "{mode}");
+        assert_eq!(actual.status.code(), Some(0), "{mode}");
+        let expected_config: serde_json::Value = serde_yaml_ng::from_str(
+            &std::fs::read_to_string(reference.0.join("backlog/config.yml")).unwrap(),
+        )
+        .unwrap();
+        let actual_config: serde_json::Value = serde_yaml_ng::from_str(
+            &std::fs::read_to_string(candidate.0.join("backlog/config.yml")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(actual_config, expected_config, "{mode}");
+        for name in [
+            "AGENTS.md",
+            "CLAUDE.md",
+            "GEMINI.md",
+            ".github/copilot-instructions.md",
+        ] {
+            assert_eq!(
+                candidate.0.join(name).exists(),
+                expected_files.contains(&name),
+                "{mode}: {name}"
+            );
+            assert_eq!(
+                candidate.0.join(name).exists(),
+                reference.0.join(name).exists(),
+                "{mode}: {name}"
+            );
+        }
+    }
+}
+
+#[test]
+fn rust_init_advanced_flags_match_typescript_config_and_agent_effects() {
+    let reference = Fixture::new();
+    let candidate = Fixture::new();
+    for fixture in [&reference, &candidate] {
+        std::fs::remove_file(fixture.0.join("backlog.config.yml")).unwrap();
+        let output = Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&fixture.0)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+    }
+    let args = [
+        "init",
+        "Advanced Flags",
+        "--defaults",
+        "--integration-mode",
+        "cli",
+        "--check-branches",
+        "true",
+        "--include-remote",
+        "false",
+        "--branch-days",
+        "12",
+        "--bypass-git-hooks",
+        "true",
+        "--zero-padded-ids",
+        "4",
+        "--default-editor",
+        "notepad",
+        "--web-port",
+        "6500",
+        "--auto-open-browser",
+        "false",
+        "--install-claude-agent",
+        "true",
+    ];
+    let expected = typescript_cli(&args, &reference.0);
+    let actual = rust_cli(&args, &candidate.0);
+    assert_eq!(actual.status.code(), expected.status.code());
+    assert_eq!(actual.status.code(), Some(0));
+    let expected_config: serde_json::Value = serde_yaml_ng::from_str(
+        &std::fs::read_to_string(reference.0.join("backlog/config.yml")).unwrap(),
+    )
+    .unwrap();
+    let actual_config: serde_json::Value = serde_yaml_ng::from_str(
+        &std::fs::read_to_string(candidate.0.join("backlog/config.yml")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(actual_config, expected_config);
+    assert_eq!(actual_config["default_editor"], "notepad");
+    assert_eq!(actual_config["active_branch_days"], 12);
+    assert_eq!(actual_config["zero_padded_ids"], 4);
+    assert!(
+        candidate
+            .0
+            .join(".claude/agents/project-manager-backlog.md")
+            .is_file()
+    );
+}
+
+#[test]
+fn rust_init_help_does_not_run_global_config_migration() {
+    let reference = Fixture::new();
+    let candidate = Fixture::new();
+    let source = "# legacy comment\nproject_name: Legacy\nstatuses: [To Do, Done]\n";
+    for fixture in [&reference, &candidate] {
+        std::fs::write(fixture.0.join("backlog.config.yml"), source).unwrap();
+    }
+    let expected = typescript_cli(&["init", "--help"], &reference.0);
+    let actual = rust_cli(&["init", "--help"], &candidate.0);
+    assert_eq!(actual.status.code(), expected.status.code());
+    assert_eq!(actual.status.code(), Some(0));
+    assert_eq!(
+        std::fs::read_to_string(candidate.0.join("backlog.config.yml")).unwrap(),
+        source
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn rust_init_interactive_terminal_accepts_the_no_git_setup_path() {
+    let fixture = Fixture::new();
+    std::fs::remove_file(fixture.0.join("backlog.config.yml")).unwrap();
+    let script = Command::new("script").arg("--version").output();
+    if script.is_err() {
+        return;
+    }
+    let command = format!("{} init", env!("CARGO_BIN_EXE_backlog"));
+    let mut child = Command::new("script")
+        .args(["-qefc", &command, "/dev/null"])
+        .current_dir(&fixture.0)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    use std::io::Write;
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"2\nInteractive Project\n1\n1\n\n3\nn\n")
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(fixture.0.join("backlog/tasks").is_dir());
+    assert!(!fixture.0.join(".git").exists());
+    let config = std::fs::read_to_string(fixture.0.join("backlog/config.yml")).unwrap();
+    assert!(config.contains("project_name: \"Interactive Project\""));
+    assert!(config.contains("filesystem_only: true"));
+}
+
+#[cfg(unix)]
+#[test]
+fn rust_init_interactive_advanced_choices_write_config_and_completion() {
+    let fixture = Fixture::new();
+    std::fs::remove_file(fixture.0.join("backlog.config.yml")).unwrap();
+    let fake_bin = fixture.0.join("test-home/bin");
+    std::fs::create_dir_all(&fake_bin).unwrap();
+    let nano = fake_bin.join("nano");
+    std::fs::write(&nano, "#!/bin/sh\nexit 0\n").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&nano, std::fs::Permissions::from_mode(0o755)).unwrap();
+    if Command::new("script").arg("--version").output().is_err() {
+        return;
+    }
+    let command = format!("{} init", env!("CARGO_BIN_EXE_backlog"));
+    let mut child = Command::new("script")
+        .args(["-qefc", &command, "/dev/null"])
+        .current_dir(&fixture.0)
+        .env("GIT_AUTHOR_NAME", "Test User")
+        .env("GIT_AUTHOR_EMAIL", "test@example.com")
+        .env("GIT_COMMITTER_NAME", "Test User")
+        .env("GIT_COMMITTER_EMAIL", "test@example.com")
+        .env("HOME", fixture.0.join("test-home"))
+        .env("SHELL", "/bin/bash")
+        .env("EDITOR", "")
+        .env_remove("VISUAL")
+        .env("PATH", format!("{}:/usr/bin:/bin", fake_bin.display()))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    use std::io::Write;
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"1\nAdvanced Project\n1\n1\n\n1\n\nAGENTS.md\ny\ny\ny\ny\n\nn\ny\ny\n4\n\n1\nAcceptance is met\n5\nn\nn\n")
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    let transcript = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        transcript.find("Install shell completions now?")
+            < transcript.find("Check task states across active branches?"),
+        "the shell completion choice should begin advanced settings: {transcript}"
+    );
+    assert!(
+        transcript
+            .matches("Select instruction files for CLI-based AI tools")
+            .count()
+            >= 2,
+        "empty selection must return to the instruction prompt: {transcript}"
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(fixture.0.join(".git").is_dir());
+    assert!(fixture.0.join("AGENTS.md").is_file());
+    assert!(
+        fixture
+            .0
+            .join("test-home/.local/share/bash-completion/completions/backlog")
+            .is_file()
+    );
+    let config: serde_json::Value = serde_yaml_ng::from_str(
+        &std::fs::read_to_string(fixture.0.join("backlog/config.yml")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(config["auto_commit"], true);
+    assert_eq!(config["zero_padded_ids"], 4);
+    assert_eq!(config["default_editor"], "nano");
+    assert_eq!(
+        config["definition_of_done"],
+        serde_json::json!(["Acceptance is met"])
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn rust_init_interactive_mcp_configures_selected_clients_and_installs_completions() {
+    let fixture = Fixture::new();
+    std::fs::remove_file(fixture.0.join("backlog.config.yml")).unwrap();
+    let home = fixture.0.join("mcp-home");
+    let fake_bin = fixture.0.join("mcp-bin");
+    std::fs::create_dir_all(&fake_bin).unwrap();
+    for (name, body) in [
+        (
+            "codex",
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$MCP_SETUP_CAPTURE\"\nexit 0\n",
+        ),
+        (
+            "xdg-open",
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$MCP_GUIDE_CAPTURE\"\nexit 0\n",
+        ),
+        ("nano", "#!/bin/sh\nexit 0\n"),
+    ] {
+        let path = fake_bin.join(name);
+        std::fs::write(&path, body).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    if Command::new("script").arg("--version").output().is_err() {
+        return;
+    }
+    let command = format!("{} init", env!("CARGO_BIN_EXE_backlog"));
+    let mut child = Command::new("script")
+        .args(["-qefc", &command, "/dev/null"])
+        .current_dir(&fixture.0)
+        .env("HOME", &home)
+        .env("SHELL", "/bin/bash")
+        .env("EDITOR", "")
+        .env_remove("VISUAL")
+        .env("PATH", format!("{}:/usr/bin:/bin", fake_bin.display()))
+        .env("MCP_SETUP_CAPTURE", fixture.0.join("mcp-setup-args.txt"))
+        .env("MCP_GUIDE_CAPTURE", fixture.0.join("mcp-guide-url.txt"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    use std::io::Write;
+    let answers = [
+        "2",
+        "MCP Project",
+        "1",
+        "1",
+        "",
+        "2",
+        "",
+        "codex,guide",
+        "y",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "5",
+        "",
+    ]
+    .join("\n")
+        + "\n";
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(answers.as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let setup_args = std::fs::read_to_string(fixture.0.join("mcp-setup-args.txt")).unwrap();
+    assert_eq!(setup_args, "mcp\nadd\nbacklog\n--\nbacklog\nmcp\nstart\n");
+    assert_eq!(
+        std::fs::read_to_string(fixture.0.join("mcp-guide-url.txt")).unwrap(),
+        "https://github.com/MrLesk/Backlog.md#-mcp-integration-model-context-protocol\n"
+    );
+    let agents = std::fs::read_to_string(fixture.0.join("AGENTS.md")).unwrap();
+    assert!(agents.contains("<!-- BACKLOG.MD MCP GUIDELINES START -->"));
+    assert!(
+        home.join(".local/share/bash-completion/completions/backlog")
+            .is_file()
+    );
+    let transcript = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        transcript.find("Install shell completions now?")
+            < transcript.find("Check task states across active branches?"),
+        "the shell completion choice should begin advanced settings: {transcript}"
+    );
+    assert!(
+        transcript
+            .matches("Which AI tools should we configure right now?")
+            .count()
+            >= 2
+    );
+    assert!(transcript.contains("OpenAI Codex, Setup guide opened"));
+    assert!(transcript.contains("Shell completions installed"));
+}
+
+#[test]
+fn rust_init_repeat_preserves_existing_prefix_settings_and_rejects_path_changes() {
+    let reference = Fixture::new();
+    let candidate = Fixture::new();
+    for fixture in [&reference, &candidate] {
+        std::fs::remove_file(fixture.0.join("backlog.config.yml")).unwrap();
+    }
+    let initial = [
+        "init",
+        "Original",
+        "--no-git",
+        "--defaults",
+        "--integration-mode",
+        "none",
+        "--task-prefix",
+        "JIRA",
+    ];
+    for fixture in [&reference, &candidate] {
+        let output = typescript_cli(&initial, &fixture.0);
+        assert_eq!(output.status.code(), Some(0));
+    }
+    let extra = "\ncustom_setting: preserve-me\n";
+    for fixture in [&reference, &candidate] {
+        let path = fixture.0.join("backlog/config.yml");
+        let mut source = std::fs::read_to_string(&path).unwrap();
+        source.push_str("\ndefault_status: Done\ndefault_reporter: Mira\ndate_format: MM/dd/yyyy\npriorities: [P1, P2]\n");
+        source.push_str(extra);
+        std::fs::write(path, source).unwrap();
+    }
+    let rename = [
+        "init",
+        "Renamed",
+        "--no-git",
+        "--defaults",
+        "--integration-mode",
+        "none",
+    ];
+    let expected = typescript_cli(&rename, &reference.0);
+    let actual = rust_cli(&rename, &candidate.0);
+    assert_eq!(actual.status.code(), expected.status.code());
+    assert_eq!(actual.status.code(), Some(0));
+    let expected_config: serde_json::Value = serde_yaml_ng::from_str(
+        &std::fs::read_to_string(reference.0.join("backlog/config.yml")).unwrap(),
+    )
+    .unwrap();
+    let actual_config: serde_json::Value = serde_yaml_ng::from_str(
+        &std::fs::read_to_string(candidate.0.join("backlog/config.yml")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(actual_config, expected_config);
+    assert_eq!(actual_config["project_name"], "Renamed");
+    assert_eq!(actual_config["task_prefix"], "JIRA");
+    assert_eq!(actual_config["default_status"], "Done");
+    assert_eq!(actual_config["default_reporter"], "Mira");
+    assert_eq!(actual_config["date_format"], "MM/dd/yyyy");
+    assert_eq!(actual_config["priorities"], serde_json::json!(["P1", "P2"]));
+
+    let path_change = [
+        "init",
+        "Renamed",
+        "--no-git",
+        "--defaults",
+        "--integration-mode",
+        "none",
+        "--backlog-dir",
+        "other",
+    ];
+    let expected = typescript_cli(&path_change, &reference.0);
+    let actual = rust_cli(&path_change, &candidate.0);
+    assert_eq!(actual.status.code(), expected.status.code());
+    assert_eq!(actual.status.code(), Some(1));
+}
+
+#[test]
+fn rust_init_creates_selected_instruction_files() {
+    let reference = Fixture::new();
+    let fixture = Fixture::new();
+    for target in [&reference, &fixture] {
+        std::fs::remove_file(target.0.join("backlog.config.yml")).unwrap();
+    }
+    let args = [
+        "init",
+        "Agents Project",
+        "--no-git",
+        "--defaults",
+        "--agent-instructions",
+        "claude,cursor",
+    ];
+    let expected = typescript_cli(&args, &reference.0);
+    let output = rust_cli(&args, &fixture.0);
+    assert_eq!(output.status.code(), expected.status.code());
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    for path in ["CLAUDE.md", "AGENTS.md"] {
+        let content = std::fs::read_to_string(fixture.0.join(path)).unwrap();
+        assert!(content.contains("BACKLOG.MD GUIDELINES START"), "{path}");
+        let expected_content = std::fs::read_to_string(reference.0.join(path)).unwrap();
+        assert_eq!(
+            content.replace(
+                "instructions-version: 1.55.3",
+                "instructions-version: 0.0.0"
+            ),
+            expected_content
+        );
+    }
+
+    for target in [&reference, &fixture] {
+        let path = target.0.join("AGENTS.md");
+        let content = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, format!("# User heading\n\n{content}\nUser footer\n")).unwrap();
+    }
+    let expected = typescript_cli(&args, &reference.0);
+    let actual = rust_cli(&args, &fixture.0);
+    assert_eq!(actual.status.code(), expected.status.code());
+    assert_eq!(actual.status.code(), Some(0));
+    assert_eq!(
+        std::fs::read_to_string(fixture.0.join("AGENTS.md"))
+            .unwrap()
+            .replace(
+                "instructions-version: 1.55.3",
+                "instructions-version: 0.0.0"
+            ),
+        std::fs::read_to_string(reference.0.join("AGENTS.md")).unwrap()
+    );
+}
+
+#[test]
 fn rust_legacy_migration_preserves_empty_project_name_and_missing_prefix() {
     let reference = Fixture::new();
     let candidate = Fixture::new();
