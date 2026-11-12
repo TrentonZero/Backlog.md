@@ -4019,6 +4019,196 @@ fn rust_decision_create_matches_typescript_sections_defaults_and_refusals() {
 }
 
 #[test]
+fn rust_milestone_list_matches_typescript_aliases_sections_and_windows() {
+    let reference = Fixture::new();
+    let candidate = Fixture::new();
+    for fixture in [&reference, &candidate] {
+        fixture.file(
+            "backlog/milestones/m-0 - Active Release.md",
+            "---\nid: m-0\ntitle: Active Release\ndue_date: 2026-08-15\n---\n\n## Description\n\nActive milestone.\n",
+        );
+        fixture.file(
+            "backlog/milestones/m-1 - In Progress.md",
+            "---\nid: m-1\ntitle: In Progress\n---\n",
+        );
+        fixture.file(
+            "backlog/milestones/m-2 - Completed.md",
+            "---\nid: m-2\ntitle: Completed\n---\n",
+        );
+        fixture.file(
+            "backlog/tasks/task-1-active.md",
+            "---\nid: task-1\ntitle: Active task\nstatus: To Do\nmilestone: Active Release\n---\n",
+        );
+        fixture.file(
+            "backlog/tasks/task-2-progress.md",
+            "---\nid: task-2\ntitle: Progress task\nstatus: In Progress\nmilestone: m-1\n---\n",
+        );
+        fixture.file(
+            "backlog/tasks/task-3-done.md",
+            "---\nid: task-3\ntitle: Completed task\nstatus: Done\nmilestone: Completed\n---\n",
+        );
+    }
+
+    for args in [
+        vec!["milestone", "list", "--plain"],
+        vec!["milestones", "list", "--show-completed", "--plain"],
+        vec!["milestone", "list", "--max-count", "1"],
+        vec![
+            "milestone",
+            "list",
+            "--show-completed",
+            "--max-count",
+            "1",
+            "--skip",
+            "2",
+        ],
+        vec!["milestone", "list", "--count"],
+        vec!["milestone", "list", "--show-completed", "--count"],
+        vec!["milestone", "list", "--skip", "99", "--max-count", "1"],
+        vec!["milestone", "list", "--max-count", "0"],
+    ] {
+        assert_cli_process_parity(&args, &reference, &candidate);
+    }
+
+    let empty_reference = Fixture::new();
+    let empty_candidate = Fixture::new();
+    for fixture in [&empty_reference, &empty_candidate] {
+        std::fs::create_dir_all(fixture.0.join("backlog/milestones")).unwrap();
+        std::fs::create_dir_all(fixture.0.join("backlog/tasks")).unwrap();
+    }
+    let (expected, _) = assert_cli_process_parity(
+        &["milestone", "list", "--plain"],
+        &empty_reference,
+        &empty_candidate,
+    );
+    assert_eq!(
+        String::from_utf8(expected.stdout).unwrap(),
+        "Active milestones (0):\n  (none)\n\nCompleted milestones (0):\n  (none)\n"
+    );
+}
+
+#[test]
+fn rust_milestone_add_matches_typescript_trim_validation_and_files() {
+    let reference = Fixture::new();
+    let candidate = Fixture::new();
+    for fixture in [&reference, &candidate] {
+        std::fs::create_dir_all(fixture.0.join("backlog")).unwrap();
+    }
+    let args = [
+        "milestone",
+        "add",
+        "  Ship V1  ",
+        "--description",
+        "Release scope\n\n### Checks\n\nShip it.",
+        "--due-date",
+        "2026-08-15",
+    ];
+    assert_cli_process_parity(&args, &reference, &candidate);
+    let expected =
+        std::fs::read_to_string(reference.0.join("backlog/milestones/m-0 - ship-v1.md")).unwrap();
+    let actual =
+        std::fs::read_to_string(candidate.0.join("backlog/milestones/m-0 - ship-v1.md")).unwrap();
+    assert_eq!(actual, expected);
+    assert!(actual.contains("due_date: \"2026-08-15\""));
+    assert!(actual.contains("Release scope\n\n### Checks\n\nShip it."));
+
+    let duplicate_reference = Fixture::new();
+    let duplicate_candidate = Fixture::new();
+    for fixture in [&duplicate_reference, &duplicate_candidate] {
+        fixture.file(
+            "backlog/milestones/m-4 - Existing.md",
+            "---\nid: m-4\ntitle: Existing\n---\n",
+        );
+    }
+    for args in [
+        vec!["milestone", "add", "   "],
+        vec!["milestone", "add", " existing "],
+        vec![
+            "milestone",
+            "add",
+            "Invalid date",
+            "--due-date",
+            "2026-02-30",
+        ],
+    ] {
+        assert_cli_process_parity(&args, &duplicate_reference, &duplicate_candidate);
+        let entries = std::fs::read_dir(duplicate_candidate.0.join("backlog/milestones"))
+            .unwrap()
+            .count();
+        assert_eq!(entries, 1, "invalid create wrote a milestone: {args:?}");
+    }
+
+    let archived_reference = Fixture::new();
+    let archived_candidate = Fixture::new();
+    for fixture in [&archived_reference, &archived_candidate] {
+        fixture.file(
+            "backlog/archive/milestones/m-0 - Existing.md",
+            "---\nid: m-0\ntitle: Existing\n---\n",
+        );
+    }
+    assert_cli_process_parity(
+        &["milestone", "add", "Existing"],
+        &archived_reference,
+        &archived_candidate,
+    );
+    assert!(
+        archived_candidate
+            .0
+            .join("backlog/milestones/m-1 - existing.md")
+            .exists()
+    );
+
+    let default_reference = Fixture::new();
+    let default_candidate = Fixture::new();
+    for fixture in [&default_reference, &default_candidate] {
+        std::fs::create_dir_all(fixture.0.join("backlog")).unwrap();
+    }
+    assert_cli_process_parity(
+        &["milestone", "add", "Default"],
+        &default_reference,
+        &default_candidate,
+    );
+    let default_record = std::fs::read_to_string(
+        default_candidate
+            .0
+            .join("backlog/milestones/m-0 - default.md"),
+    )
+    .unwrap();
+    assert!(default_record.contains("Milestone: Default"));
+}
+
+#[test]
+fn rust_milestone_add_auto_commits_only_the_created_file() {
+    let reference = Fixture::new();
+    let candidate = Fixture::new();
+    for fixture in [&reference, &candidate] {
+        let config_path = fixture.0.join("backlog.config.yml");
+        let config = std::fs::read_to_string(&config_path).unwrap();
+        std::fs::write(
+            &config_path,
+            config.replace("statuses:\n", "auto_commit: true\nstatuses:\n"),
+        )
+        .unwrap();
+        std::fs::create_dir_all(fixture.0.join("backlog/milestones")).unwrap();
+        std::fs::create_dir_all(fixture.0.join("backlog/tasks")).unwrap();
+        initialize_git_fixture(fixture);
+    }
+    assert_cli_process_parity(
+        &["milestone", "add", "Committed Release"],
+        &reference,
+        &candidate,
+    );
+    assert_eq!(
+        selected_commit_result(&candidate),
+        (
+            "backlog: Add milestone m-0".into(),
+            "backlog/milestones/m-0 - committed-release.md".into(),
+            "UNRELATED.txt".into(),
+        )
+    );
+}
+
+#[test]
 fn rust_decision_edit_matches_typescript_source_preservation_and_refusals() {
     let source = "---\nid: decision-1\ntitle: Alpha\ndate: 2026-01-01\nstatus: accepted\nsuperseded_by: decision-2\nowner: platform # keep\n---\n\n## Context\n\nOld context.\n\n## Decision\n\nOld choice.\n\n## Consequences\n\nKeep consequences.\n\n## Alternatives\n\nKeep alternatives.\n\n## Revisit trigger\n\nReview next release.\n";
     let setup = |fixture: &Fixture| {

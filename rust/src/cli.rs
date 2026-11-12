@@ -71,6 +71,12 @@ enum Command {
         #[command(subcommand)]
         command: DecisionCommand,
     },
+    /// List and create milestones.
+    #[command(alias = "milestones")]
+    Milestone {
+        #[command(subcommand)]
+        command: Option<MilestoneCommand>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -93,6 +99,38 @@ enum DecisionCommand {
     Restore { decision_id: String },
     /// Permanently delete an archived decision without prompting.
     Delete { decision_id: String },
+}
+
+#[derive(Debug, Subcommand)]
+enum MilestoneCommand {
+    /// List milestones with completion status.
+    List(MilestoneListArgs),
+    /// Add a milestone file.
+    Add(MilestoneAddArgs),
+}
+
+#[derive(Debug, Args)]
+struct MilestoneListArgs {
+    /// Include completed milestones.
+    #[arg(long)]
+    show_completed: bool,
+    /// Use human-readable text output.
+    #[arg(long)]
+    plain: bool,
+    #[command(flatten)]
+    window: ListWindowArgs,
+}
+
+#[derive(Debug, Args)]
+struct MilestoneAddArgs {
+    /// Milestone name.
+    name: String,
+    /// Milestone description.
+    #[arg(short, long)]
+    description: Option<String>,
+    /// Set due date (YYYY-MM-DD).
+    #[arg(long)]
+    due_date: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -818,6 +856,19 @@ pub fn run() -> Result<(), String> {
         Command::Decision {
             command: DecisionCommand::Delete { decision_id },
         } => run_decision_lifecycle(&decision_id, DecisionLifecycleOperation::Delete),
+        Command::Milestone { command } => match command {
+            Some(MilestoneCommand::List(options)) => run_milestone_list(options),
+            Some(MilestoneCommand::Add(options)) => run_milestone_add(options),
+            None => {
+                let mut command = Cli::command();
+                command
+                    .find_subcommand_mut("milestone")
+                    .unwrap()
+                    .print_help()
+                    .map_err(|error| error.to_string())?;
+                write_stdout("\n")
+            }
+        },
     }
 }
 
@@ -3273,6 +3324,348 @@ fn run_decision_lifecycle(
         ))?;
     }
     Ok(())
+}
+
+#[derive(Clone)]
+struct MilestoneListRow {
+    id: String,
+    label: String,
+    total: usize,
+    done: usize,
+    due_date: Option<String>,
+    is_completed: bool,
+}
+
+fn run_milestone_list(options: MilestoneListArgs) -> Result<(), String> {
+    let window = parse_list_window(&options.window, "backlog milestone list")?;
+    let context = project_context()?;
+    let milestones = MilestoneStore::new(&context.root, &context.backlog_directory);
+    let active_milestones = milestones.list_active();
+    let archived_milestones = milestones.list_archived();
+    let tasks = context
+        .store
+        .list_tasks()
+        .into_iter()
+        .map(|entry| entry.task)
+        .collect::<Vec<_>>();
+    let rows = milestone_list_rows(&tasks, &active_milestones, &archived_milestones);
+    let active = rows
+        .iter()
+        .filter(|row| !row.is_completed)
+        .collect::<Vec<_>>();
+    let completed = rows
+        .iter()
+        .filter(|row| row.is_completed)
+        .collect::<Vec<_>>();
+    let show_completed = options.show_completed;
+    let active_count = active.len();
+    let completed_count = completed.len();
+    let listed = if show_completed {
+        rows
+    } else {
+        rows.into_iter().filter(|row| !row.is_completed).collect()
+    };
+    let total = listed.len();
+    let start = window.skip.min(total);
+    let end = window
+        .max_count
+        .map_or(total, |count| start.saturating_add(count).min(total));
+    let page = &listed[start..end];
+    if window.count {
+        return write_stdout(&format!("{}\n", page.len()));
+    }
+
+    let cut = page.len() < total;
+    if !page.is_empty() || total == 0 {
+        let next_skip = (end < total).then_some(end);
+        let first_window = window.skip == 0 || total == 0;
+        let lists_completed = show_completed && completed_count > 0;
+        let print_active =
+            page.iter().any(|row| !row.is_completed) || (active_count == 0 && first_window);
+        let print_completed =
+            page.iter().any(|row| row.is_completed) || (!lists_completed && next_skip.is_none());
+        let mut sections = Vec::new();
+        if print_active {
+            let lines = if active_count == 0 {
+                vec!["  (none)".to_owned()]
+            } else {
+                page.iter()
+                    .filter(|row| !row.is_completed)
+                    .map(format_milestone_list_row)
+                    .collect()
+            };
+            sections.push(format!(
+                "Active milestones ({}):\n{}",
+                active_count,
+                lines.join("\n")
+            ));
+        }
+        if print_completed {
+            let lines = if completed_count == 0 {
+                vec!["  (none)".to_owned()]
+            } else if show_completed {
+                page.iter()
+                    .filter(|row| row.is_completed)
+                    .map(format_milestone_list_row)
+                    .collect()
+            } else {
+                vec!["  (collapsed, use --show-completed to list)".to_owned()]
+            };
+            sections.push(format!(
+                "Completed milestones ({}):\n{}",
+                completed_count,
+                lines.join("\n")
+            ));
+        }
+        if !sections.is_empty() {
+            write_stdout(&format!("{}\n", sections.join("\n\n")))?;
+        }
+    }
+    if cut {
+        write_stdout(&format_list_window_footer(
+            window.skip,
+            page.len(),
+            total,
+            (end < total).then_some(end),
+            "\n",
+        ))?;
+    }
+    let _ = options.plain;
+    Ok(())
+}
+
+fn format_milestone_list_row(row: &MilestoneListRow) -> String {
+    let due_date = row
+        .due_date
+        .as_deref()
+        .map(|date| format!(", due {}", format_display_date(date, "")))
+        .unwrap_or_default();
+    format!(
+        "  {}: {} ({}/{} done{due_date})",
+        row.id, row.label, row.done, row.total
+    )
+}
+
+fn milestone_list_rows(
+    tasks: &[TaskRecord],
+    active_milestones: &[crate::records::MilestoneRecord],
+    archived_milestones: &[crate::records::MilestoneRecord],
+) -> Vec<MilestoneListRow> {
+    let mut values = active_milestones
+        .iter()
+        .map(|milestone| milestone.id.clone())
+        .collect::<Vec<_>>();
+    let mut assignments = Vec::with_capacity(tasks.len());
+    for task in tasks {
+        let Some(value) = task
+            .milestone
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            assignments.push(None);
+            continue;
+        };
+        let resolved =
+            resolve_milestone_list_assignment(value, active_milestones, archived_milestones);
+        if let Some(value) = resolved.as_ref()
+            && !values
+                .iter()
+                .any(|existing| existing.eq_ignore_ascii_case(value))
+        {
+            values.push(value.clone());
+        }
+        assignments.push(resolved);
+    }
+
+    values
+        .into_iter()
+        .map(|id| {
+            let milestone = active_milestones
+                .iter()
+                .find(|milestone| milestone.id.eq_ignore_ascii_case(&id));
+            let assigned = assignments
+                .iter()
+                .zip(tasks)
+                .filter_map(|(value, task)| {
+                    value
+                        .as_deref()
+                        .filter(|value| value.eq_ignore_ascii_case(&id))
+                        .map(|_| task)
+                })
+                .collect::<Vec<_>>();
+            let total = assigned.len();
+            let done = assigned
+                .iter()
+                .filter(|task| is_milestone_done_status(&task.status))
+                .count();
+            MilestoneListRow {
+                id: id.clone(),
+                label: milestone.map_or_else(|| id.clone(), |milestone| milestone.title.clone()),
+                total,
+                done,
+                due_date: milestone.and_then(|milestone| milestone.due_date.clone()),
+                is_completed: total > 0 && done == total,
+            }
+        })
+        .collect()
+}
+
+fn is_milestone_done_status(status: &str) -> bool {
+    let status = status.to_lowercase();
+    status.contains("done") || status.contains("complete")
+}
+
+fn resolve_milestone_list_assignment(
+    value: &str,
+    active_milestones: &[crate::records::MilestoneRecord],
+    archived_milestones: &[crate::records::MilestoneRecord],
+) -> Option<String> {
+    if let Some(milestone) = resolve_milestone_record(value, active_milestones) {
+        return Some(milestone.id.clone());
+    }
+    if resolve_milestone_record(value, archived_milestones).is_some() {
+        return None;
+    }
+    Some(value.trim().to_owned())
+}
+
+fn resolve_milestone_record<'a>(
+    value: &str,
+    milestones: &'a [crate::records::MilestoneRecord],
+) -> Option<&'a crate::records::MilestoneRecord> {
+    let normalized = value.trim();
+    if normalized.is_empty() {
+        return None;
+    }
+    let raw_key = normalized.to_lowercase();
+    if let Some(milestone) = milestones
+        .iter()
+        .find(|milestone| milestone.id.trim().eq_ignore_ascii_case(&raw_key))
+    {
+        return Some(milestone);
+    }
+    if let Some(number) = milestone_numeric_id(normalized)
+        && let Some(milestone) = milestones
+            .iter()
+            .find(|milestone| milestone_numeric_id(&milestone.id) == Some(number))
+    {
+        return Some(milestone);
+    }
+    let mut title_matches = milestones
+        .iter()
+        .filter(|milestone| milestone.title.trim().eq_ignore_ascii_case(normalized));
+    let first = title_matches.next()?;
+    title_matches.next().is_none().then_some(first)
+}
+
+fn milestone_numeric_id(value: &str) -> Option<u64> {
+    let normalized = value.trim();
+    let numeric = normalized
+        .strip_prefix("m-")
+        .or_else(|| normalized.strip_prefix("M-"))
+        .unwrap_or(normalized);
+    (!numeric.is_empty() && numeric.bytes().all(|byte| byte.is_ascii_digit()))
+        .then(|| numeric.parse().ok())
+        .flatten()
+}
+
+fn run_milestone_add(options: MilestoneAddArgs) -> Result<(), String> {
+    let title = options.name.trim();
+    if title.is_empty() {
+        return Err("Milestone name cannot be empty.".into());
+    }
+    let context = project_context()?;
+    let store = MilestoneStore::new(&context.root, &context.backlog_directory);
+    let active = store.list_active();
+    let active = active.iter().collect::<Vec<_>>();
+    let requested = milestone_create_keys(title, &active);
+    if let Some(duplicate) = active.iter().find(|milestone| {
+        requested
+            .iter()
+            .any(|key| milestone_create_record_keys(milestone).contains(key))
+    }) {
+        return Err(format!(
+            "Milestone alias conflict: \"{title}\" matches existing milestone \"{}\" ({}).",
+            duplicate.title, duplicate.id
+        ));
+    }
+    let milestone = store
+        .create(
+            title,
+            options.description.as_deref(),
+            options.due_date.as_deref(),
+        )
+        .map_err(|error| error.to_string())?;
+    let path = find_milestone_record_path(&context, &milestone.id)?;
+    commit_created_record(
+        &context,
+        "Milestone",
+        &format!("backlog: Add milestone {}", milestone.id),
+        &path,
+    )?;
+    let due_date = milestone
+        .due_date
+        .as_deref()
+        .map(|date| format!("\nDue: {}", format_display_date(date, "")))
+        .unwrap_or_default();
+    write_stdout(&format!(
+        "Created milestone \"{}\" ({}).{due_date}\n",
+        milestone.title, milestone.id
+    ))
+}
+
+fn milestone_create_keys(
+    name: &str,
+    milestones: &[&crate::records::MilestoneRecord],
+) -> HashSet<String> {
+    let normalized = name.trim().to_lowercase();
+    let mut keys = milestone_create_id_keys(&normalized);
+    keys.insert(normalized.clone());
+    for milestone in milestones
+        .iter()
+        .filter(|milestone| milestone.title.trim().eq_ignore_ascii_case(&normalized))
+    {
+        keys.extend(milestone_create_id_keys(&milestone.id));
+    }
+    keys
+}
+
+fn milestone_create_record_keys(milestone: &crate::records::MilestoneRecord) -> HashSet<String> {
+    let mut keys = milestone_create_id_keys(&milestone.id);
+    keys.insert(milestone.title.trim().to_lowercase());
+    keys
+}
+
+fn milestone_create_id_keys(value: &str) -> HashSet<String> {
+    let value = value.trim().to_lowercase();
+    let mut keys = HashSet::from([value.clone()]);
+    if let Some(number) = milestone_numeric_id(&value) {
+        keys.insert(number.to_string());
+        keys.insert(format!("m-{number}"));
+    }
+    keys
+}
+
+fn find_milestone_record_path(context: &ProjectContext, id: &str) -> Result<PathBuf, String> {
+    let directory = context
+        .root
+        .join(&context.backlog_directory)
+        .join("milestones");
+    for entry in fs::read_dir(&directory).map_err(|error| error.to_string())? {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let path = entry.path();
+        if path.extension().is_some_and(|extension| extension == "md")
+            && let Ok(source) = fs::read_to_string(&path)
+            && let Ok(milestone) = crate::records::parse_milestone(&source)
+            && milestone.id == id
+        {
+            return Ok(path);
+        }
+    }
+    Err(format!(
+        "Created milestone {id} but could not find its file."
+    ))
 }
 
 fn run_draft_view(task_id: &str, options: DraftViewArgs) -> Result<(), String> {
