@@ -77,7 +77,13 @@ fn assert_cli_process_parity(
         expected.status.code(),
         "args: {args:?}"
     );
-    assert_eq!(actual.stdout, expected.stdout, "args: {args:?}");
+    assert_eq!(
+        actual.stdout,
+        expected.stdout,
+        "args: {args:?}\nactual stdout: {:?}\nexpected stdout: {:?}",
+        String::from_utf8_lossy(&actual.stdout),
+        String::from_utf8_lossy(&expected.stdout)
+    );
     assert_eq!(actual.stderr, expected.stderr, "args: {args:?}");
     (expected, actual)
 }
@@ -3813,4 +3819,118 @@ fn rust_document_create_matches_typescript_content_output_and_refusals() {
         );
     }
     assert!(!std::path::Path::new(&absolute_path).exists());
+}
+
+fn decision_fixture() -> Fixture {
+    let fixture = Fixture::new();
+    fixture.file(
+        "backlog/decisions/decision-1 - Alpha.md",
+        "---\nid: decision-1\ntitle: Alpha\ndate: 2026-01-01\nstatus: accepted\nsuperseded_by: decision-2\n---\n\n## Context\n\nAlpha context.\n\n## Decision\n\n<!-- SECTION:DECISION:BEGIN -->\nChoose alpha.\n<!-- SECTION:DECISION:END -->\n",
+    );
+    fixture.file(
+        "backlog/decisions/decision-2 - Beta.md",
+        "---\nid: decision-2\ntitle: Beta\ndate: 2026-01-02\nstatus: proposed\n---\n\nBeta content.\n",
+    );
+    fixture.file(
+        "backlog/archive/decisions/decision-3 - Archived.md",
+        "---\nid: decision-3\ntitle: Archived\ndate: 2026-01-03\nupdated_date: 2026-02-03\nstatus: rejected\n---\n\nArchived content.\n",
+    );
+    fixture
+}
+
+#[test]
+fn rust_decision_list_matches_typescript_plain_json_windows_and_empty() {
+    let reference = decision_fixture();
+    let candidate = decision_fixture();
+    for args in [
+        vec!["decision", "list", "--plain"],
+        vec!["decision", "list", "--json"],
+        vec!["decision", "list", "--max-count", "1"],
+        vec!["decision", "list", "--skip", "1", "--max-count", "1"],
+        vec![
+            "decision",
+            "list",
+            "--count",
+            "--skip",
+            "1",
+            "--max-count",
+            "1",
+        ],
+        vec![
+            "decision",
+            "list",
+            "--json",
+            "--skip",
+            "1",
+            "--max-count",
+            "1",
+        ],
+        vec!["decision", "list", "--json", "--count"],
+        vec!["decision", "list", "--plain", "--json"],
+    ] {
+        assert_cli_process_parity(&args, &reference, &candidate);
+    }
+
+    let empty_reference = Fixture::new();
+    let empty_candidate = Fixture::new();
+    assert_cli_process_parity(
+        &["decision", "list", "--plain"],
+        &empty_reference,
+        &empty_candidate,
+    );
+    assert_cli_process_parity(
+        &["decision", "list", "--json"],
+        &empty_reference,
+        &empty_candidate,
+    );
+}
+
+#[test]
+fn rust_decision_view_matches_typescript_active_archived_json_and_identity_errors() {
+    let reference = decision_fixture();
+    let candidate = decision_fixture();
+    for args in [
+        vec!["decision", "view", "1", "--plain"],
+        vec!["decision", "view", "decision-001", "--json"],
+        vec!["decision", "view", "3", "--plain"],
+        vec!["decision", "view", "decision-003", "--json"],
+        vec!["decision", "view", "99", "--plain"],
+        vec!["decision", "view", "1", "--plain", "--json"],
+    ] {
+        assert_cli_process_parity(&args, &reference, &candidate);
+    }
+
+    let ambiguous_reference = decision_fixture();
+    let ambiguous_candidate = decision_fixture();
+    for fixture in [&ambiguous_reference, &ambiguous_candidate] {
+        fixture.file(
+            "backlog/archive/decisions/decision-1 - Duplicate.md",
+            "---\nid: decision-1\ntitle: Duplicate\ndate: 2026-03-01\nstatus: proposed\n---\n",
+        );
+    }
+    assert_cli_process_parity(
+        &["decision", "view", "1", "--plain"],
+        &ambiguous_reference,
+        &ambiguous_candidate,
+    );
+}
+
+#[test]
+fn rust_decision_view_preserves_unmanaged_markers_and_crlf_content() {
+    let reference = decision_fixture();
+    let candidate = decision_fixture();
+    for fixture in [&reference, &candidate] {
+        let path = fixture.0.join("backlog/decisions/decision-1 - Alpha.md");
+        let source = std::fs::read_to_string(&path).unwrap();
+        let crlf = source.replace('\n', "\r\n");
+        let crlf = format!(
+            "{crlf}\r\n## Extra Notes\r\n\r\n<!-- SECTION:NOTES:BEGIN -->\r\nKeep this marker block.\r\n<!-- SECTION:NOTES:END -->\r\n\r\n<!-- SECTION:DESCRIPTION:BEGIN -->\r\nKeep this too.\r\n<!-- SECTION:DESCRIPTION:END -->"
+        );
+        std::fs::write(path, crlf).unwrap();
+    }
+    assert_cli_process_parity(
+        &["decision", "view", "1", "--plain"],
+        &reference,
+        &candidate,
+    );
 }

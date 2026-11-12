@@ -2,6 +2,7 @@
 
 use crate::{
     config::{Config, parse_config},
+    decision_store::DecisionStore,
     dependency_graph::{DependencyGraph, DependencyGraphNode},
     discovery::{find_project_root, resolve_backlog_directory},
     document_store::DocumentStore,
@@ -18,6 +19,7 @@ use crate::{
     task_store::TaskStore,
 };
 use clap::{ArgAction, Args, CommandFactory, Parser, Subcommand, ValueEnum};
+use markdown::{ParseOptions, mdast::Node, to_mdast};
 use serde_json::{Value, json};
 use std::{
     collections::{HashMap, HashSet},
@@ -64,6 +66,45 @@ enum Command {
         #[command(subcommand)]
         command: DocCommand,
     },
+    /// Decision commands.
+    Decision {
+        #[command(subcommand)]
+        command: DecisionCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum DecisionCommand {
+    /// List active decisions.
+    List(DecisionListArgs),
+    /// View an active or archived decision.
+    View {
+        decision_id: String,
+        #[command(flatten)]
+        options: DecisionViewArgs,
+    },
+}
+
+#[derive(Debug, Args)]
+struct DecisionListArgs {
+    #[command(flatten)]
+    window: ListWindowArgs,
+    /// Use human-readable text output.
+    #[arg(long)]
+    plain: bool,
+    /// Use versioned JSON output.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct DecisionViewArgs {
+    /// Use human-readable text output.
+    #[arg(long)]
+    plain: bool,
+    /// Use versioned JSON output.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -688,6 +729,16 @@ pub fn run() -> Result<(), String> {
         Command::Doc {
             command: DocCommand::Delete { document_id },
         } => run_document_lifecycle(&document_id, DocumentLifecycleOperation::Delete),
+        Command::Decision {
+            command: DecisionCommand::List(options),
+        } => run_decision_list(options),
+        Command::Decision {
+            command:
+                DecisionCommand::View {
+                    decision_id,
+                    options,
+                },
+        } => run_decision_view(&decision_id, options),
     }
 }
 
@@ -2475,6 +2526,250 @@ fn run_document_view(document_id: &str, options: DocumentViewArgs) -> Result<(),
     } else {
         write_stdout(&format!("{content}\n"))
     }
+}
+
+fn run_decision_list(options: DecisionListArgs) -> Result<(), String> {
+    if options.plain && options.json {
+        return Err("--json cannot be combined with --plain.".into());
+    }
+    if options.window.count && options.json {
+        return Err(
+            "--count cannot be combined with --json. Try 'backlog decision list --help' for options."
+                .into(),
+        );
+    }
+    let window = parse_list_window(&options.window, "backlog decision list")?;
+    let context = project_context()?;
+    let decisions = DecisionStore::new(&context.root, &context.backlog_directory, &context.prefix)
+        .list_decisions();
+    let total = decisions.len();
+    let start = window.skip.min(total);
+    let end = window
+        .max_count
+        .map_or(total, |count| start.saturating_add(count).min(total));
+    let page = &decisions[start..end];
+    let next_skip = (end < total).then_some(end);
+    let cut = page.len() < total;
+
+    if options.json {
+        return write_stdout(&decision_list_json(page, cut, total, next_skip));
+    }
+    if window.count {
+        return write_stdout(&format!("{}\n", page.len()));
+    }
+    if page.is_empty() {
+        if total == 0 {
+            write_stdout("No decisions found.\n")?;
+        }
+    } else {
+        let mut output = String::new();
+        for entry in page {
+            let decision = &entry.decision;
+            let status = if decision.status.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", decision.status)
+            };
+            let replacement = decision
+                .superseded_by
+                .as_deref()
+                .filter(|value| !value.is_empty())
+                .map(|value| format!(" [superseded by {value}]"))
+                .unwrap_or_default();
+            output.push_str(&format!(
+                "{} - {}{status}{replacement}\n",
+                decision.id, decision.title
+            ));
+        }
+        write_stdout(&output)?;
+    }
+    if cut {
+        write_stdout(&format_list_window_footer(
+            window.skip,
+            page.len(),
+            total,
+            next_skip,
+            "\n",
+        ))?;
+    }
+    Ok(())
+}
+
+fn run_decision_view(decision_id: &str, options: DecisionViewArgs) -> Result<(), String> {
+    if options.plain && options.json {
+        return Err("--json cannot be combined with --plain.".into());
+    }
+    let context = project_context()?;
+    let store = DecisionStore::new(&context.root, &context.backlog_directory, &context.prefix);
+    let entry = store
+        .get_decision(decision_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("Decision {decision_id} not found."))?;
+    if options.json {
+        let decision = &entry.decision;
+        return write_stdout(&decision_view_json(decision, entry.archived));
+    }
+    let decision = &entry.decision;
+    let mut lines = vec![format!("{} - {}", decision.id, decision.title)];
+    if entry.archived {
+        lines.push("Archived — read-only. Restore before editing.".into());
+    }
+    lines.push(format!("Date: {}", decision.date));
+    lines.push(format!("Status: {}", decision.status));
+    if let Some(replacement) = decision.superseded_by.as_deref() {
+        lines.push(format!("Superseded by: {replacement}"));
+    }
+    if let Some(updated) = decision.updated_date.as_deref() {
+        lines.push(format!("Updated: {updated}"));
+    }
+    lines.push(String::new());
+    lines.push(strip_decision_section_markers(&decision.raw_content));
+    write_stdout(&format!("{}\n", lines.join("\n")))
+}
+
+fn decision_list_json(
+    page: &[crate::decision_store::DecisionFileEntry],
+    cut: bool,
+    total: usize,
+    next_skip: Option<usize>,
+) -> String {
+    let mut output = String::from(
+        "{\n  \"schemaVersion\": 1,\n  \"kind\": \"decision-list\",\n  \"decisions\": [",
+    );
+    if !page.is_empty() {
+        output.push('\n');
+    }
+    for (index, entry) in page.iter().enumerate() {
+        let decision = &entry.decision;
+        let comma = if index + 1 == page.len() { "" } else { "," };
+        output.push_str(&format!(
+            "    {{\n      \"id\": {},\n      \"title\": {},\n      \"status\": {},\n      \"date\": {},\n      \"supersededBy\": {}\n    }}{comma}\n",
+            json_string(&decision.id),
+            json_string(&decision.title),
+            json_string(&decision.status),
+            json_optional_string(public_optional_date(&decision.date).as_deref()),
+            json_optional_string(decision.superseded_by.as_deref()),
+        ));
+    }
+    output.push_str("  ]");
+    if cut {
+        output.push_str(&format!(
+            ",\n  \"total\": {total},\n  \"nextSkip\": {}",
+            next_skip.map_or_else(|| "null".into(), |value| value.to_string())
+        ));
+    }
+    output.push_str("\n}\n");
+    output
+}
+
+fn decision_view_json(decision: &crate::records::DecisionRecord, archived: bool) -> String {
+    format!(
+        "{{\n  \"schemaVersion\": 1,\n  \"kind\": \"decision-view\",\n  \"decision\": {{\n    \"id\": {},\n    \"title\": {},\n    \"status\": {},\n    \"date\": {},\n    \"supersededBy\": {},\n    \"updatedAt\": {},\n    \"archived\": {archived},\n    \"content\": {}\n  }}\n}}\n",
+        json_string(&decision.id),
+        json_string(&decision.title),
+        json_string(&decision.status),
+        json_optional_string(public_optional_date(&decision.date).as_deref()),
+        json_optional_string(decision.superseded_by.as_deref()),
+        json_optional_string(
+            decision
+                .updated_date
+                .as_deref()
+                .and_then(public_optional_date)
+                .as_deref()
+        ),
+        json_string(&decision.raw_content),
+    )
+}
+
+fn json_string(value: &str) -> String {
+    serde_json::to_string(value).expect("serializing a string cannot fail")
+}
+
+fn json_optional_string(value: Option<&str>) -> String {
+    value.map_or_else(|| "null".into(), json_string)
+}
+
+fn public_optional_date(value: &str) -> Option<String> {
+    (!value.is_empty()).then(|| normalize_public_date(value))
+}
+
+fn strip_decision_section_markers(content: &str) -> String {
+    let Ok(tree) = to_mdast(content, &ParseOptions::default()) else {
+        return content.to_owned();
+    };
+    let lines = content
+        .split_inclusive('\n')
+        .scan(0, |offset, line| {
+            let start = *offset;
+            *offset += line.len();
+            Some((
+                start,
+                *offset,
+                line.trim_end_matches('\n').trim_end_matches('\r'),
+            ))
+        })
+        .collect::<Vec<_>>();
+    let decision_markers = ["CONTEXT", "DECISION", "CONSEQUENCES", "ALTERNATIVES"];
+    let mut removals = Vec::new();
+    for node in tree.children().into_iter().flatten() {
+        let Node::Heading(heading) = node else {
+            continue;
+        };
+        if heading.depth != 2 {
+            continue;
+        }
+        let Some(position) = &heading.position else {
+            continue;
+        };
+        let Some(source_heading) = content.get(position.start.offset..position.end.offset) else {
+            continue;
+        };
+        let Some(marker_key) = decision_markers.iter().find(|key| {
+            source_heading
+                .trim_end()
+                .eq_ignore_ascii_case(&format!("## {key}"))
+        }) else {
+            continue;
+        };
+        let begin_marker = format!("<!-- SECTION:{marker_key}:BEGIN -->");
+        let end_marker = format!("<!-- SECTION:{marker_key}:END -->");
+        let Some(heading_line) = lines.iter().position(|(start, end, _)| {
+            *start <= position.start.offset && position.end.offset <= *end
+        }) else {
+            continue;
+        };
+        let mut begin_line = heading_line + 1;
+        while begin_line < lines.len() && lines[begin_line].2.trim().is_empty() {
+            begin_line += 1;
+        }
+        if begin_line == lines.len() || lines[begin_line].2.trim_end() != begin_marker {
+            continue;
+        }
+        let mut depth = 1usize;
+        let mut end_line = begin_line + 1;
+        while end_line < lines.len() {
+            let line = lines[end_line].2.trim_end();
+            if line == begin_marker {
+                depth += 1;
+            } else if line == end_marker {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+            end_line += 1;
+        }
+        if depth == 0 {
+            removals.push((lines[begin_line].0, lines[begin_line].1));
+            removals.push((lines[end_line].0, lines[end_line].1));
+        }
+    }
+    let mut stripped = content.to_owned();
+    removals.sort_unstable_by_key(|range| std::cmp::Reverse(range.0));
+    for (start, end) in removals {
+        stripped.replace_range(start..end, "");
+    }
+    stripped
 }
 
 fn run_document_create(options: DocCreateArgs) -> Result<(), String> {
