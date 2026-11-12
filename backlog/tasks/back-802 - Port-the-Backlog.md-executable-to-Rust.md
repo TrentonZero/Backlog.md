@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@codex'
 created_date: '2026-11-07T21:53:00Z'
-updated_date: '2026-11-12T02:17:00Z'
+updated_date: '2026-11-12T02:29:00Z'
 labels: []
 dependencies:
   - BACK-801
@@ -129,4 +129,6 @@ BACK-802.40 completed: added the Rust task statistics projection and UTC date pa
 BACK-802.41 added the Rust CLI entrypoint and task list command. BACK-802.42 added task detail view with archived lookup and dependency/readiness output. BACK-802.43 added noninteractive task creation with live TypeScript parity and locked default ordinal assignment. Remaining migration surfaces include task edit/lifecycle commands, drafts/documents/decisions/milestones command adapters, browser server, MCP, TUI, distribution, and cutover gates.
 
 BACK-802.44 completed: added Rust task edit for core fields, labels, aliases, clears, locked persistence, canonical identity errors, and default/plain output. Live TypeScript parity, source preservation, identity refusals, no-write failures, and explicit clears are covered. Full Rust tests, focused Bun edit/date/milestone tests (24), rustfmt, Clippy, build, Biome, and diff checks passed; cold simplicity and complexity reviews cleared. Groma remains unavailable (command not found).
+
+BACK-802.45 completed: added Rust task archive, restore, and delete commands with TypeScript-compatible help/output, locked TaskStore mutations, byte-preserving moves, subtask refusals, and task/draft link cleanup. Full Rust suite, focused TypeScript lifecycle tests (47), rustfmt, Clippy, build, Biome, and diff checks passed; required reviews cleared. Groma remains unavailable (command not found).
 <!-- SECTION:NOTES:END -->

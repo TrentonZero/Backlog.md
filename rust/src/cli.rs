@@ -1,4 +1,4 @@
-//! Initial noninteractive Rust CLI surface for listing local tasks.
+//! Native Rust CLI for noninteractive local backlog commands.
 
 use crate::{
     config::{Config, parse_config},
@@ -54,6 +54,12 @@ enum TaskCommand {
     Create(Box<TaskCreateArgs>),
     /// Edit one task in the local working copy.
     Edit(Box<TaskEditArgs>),
+    /// Moves a task off the board into the archive. Its ID stays reserved, and its record, dependencies, and references are kept; no other task is changed.
+    Archive { task_id: String },
+    /// Moves an archived task back to the board with the same ID and the status it had. Archived tasks are read-only, so restore a task before editing it. A task that is already on the board is left as it is.
+    Restore { task_id: String },
+    /// Permanently removes an archived task and its ID when no other branch holds it. Removes links other tasks and drafts hold; requires archive first, refuses existing subtasks, and has no prompt.
+    Delete { task_id: String },
 }
 
 #[derive(Debug, Args)]
@@ -268,6 +274,15 @@ pub fn run() -> Result<(), String> {
         Command::Task {
             command: TaskCommand::Edit(options),
         } => run_task_edit(*options),
+        Command::Task {
+            command: TaskCommand::Archive { task_id },
+        } => run_task_archive(&task_id),
+        Command::Task {
+            command: TaskCommand::Restore { task_id },
+        } => run_task_restore(&task_id),
+        Command::Task {
+            command: TaskCommand::Delete { task_id },
+        } => run_task_delete(&task_id),
     }
 }
 
@@ -850,6 +865,127 @@ fn run_task_edit(options: TaskEditArgs) -> Result<(), String> {
         ));
     }
     write_stdout(&format!("Updated task {}\n", updated_task.id))
+}
+
+fn run_task_archive(task_id: &str) -> Result<(), String> {
+    let context = project_context()?;
+    let Some(task) = context
+        .store
+        .load_task(task_id)
+        .map_err(|error| error.to_string())?
+    else {
+        if let Some(archived) = context
+            .store
+            .list_archived_tasks()
+            .into_iter()
+            .find(|task| task_ids_equal(task_id, &task.task.id, &context.prefix))
+        {
+            return Err(crate::task_store::TaskStoreError::Archived(archived.task.id).to_string());
+        }
+        return Err(task_not_found(task_id));
+    };
+    let id = canonical_task_id(&task.task.id, &context.prefix);
+    if !context
+        .store
+        .archive_task(&id)
+        .map_err(|error| lifecycle_error(error, &context.prefix))?
+    {
+        return Err(task_not_found(task_id));
+    }
+    write_stdout(&format!("Archived task {id}\n"))
+}
+
+fn run_task_restore(task_id: &str) -> Result<(), String> {
+    let context = project_context()?;
+    let id = canonical_task_id(task_id, &context.prefix);
+    if context
+        .store
+        .load_task(&id)
+        .map_err(|error| error.to_string())?
+        .is_some()
+    {
+        return Err(format!(
+            "Task {id} is not archived. It is already on the board."
+        ));
+    }
+    let archived = context.store.list_archived_tasks();
+    let Some(task) = archived
+        .iter()
+        .find(|task| task_ids_equal(&id, &task.task.id, &context.prefix))
+    else {
+        return Err(task_not_found(task_id));
+    };
+    let archived_id = task.task.id.clone();
+    if !context
+        .store
+        .restore_task(&archived_id)
+        .map_err(|error| lifecycle_error(error, &context.prefix))?
+    {
+        return Err(task_not_found(task_id));
+    }
+    write_stdout(&format!("Restored task {archived_id}\n"))
+}
+
+fn run_task_delete(task_id: &str) -> Result<(), String> {
+    let context = project_context()?;
+    let id = canonical_task_id(task_id, &context.prefix);
+    if context
+        .store
+        .load_task(&id)
+        .map_err(|error| error.to_string())?
+        .is_some()
+    {
+        return Err(format!(
+            "Task {id} is not archived. A task must be archived before it can be deleted."
+        ));
+    }
+    let archived = context.store.list_archived_tasks();
+    let Some(task) = archived
+        .iter()
+        .find(|task| task_ids_equal(&id, &task.task.id, &context.prefix))
+    else {
+        return Err(task_not_found(task_id));
+    };
+    let archived_id = task.task.id.clone();
+    let deletion = context
+        .store
+        .delete_task(&archived_id)
+        .map_err(|error| lifecycle_error(error, &context.prefix))?;
+    if !deletion.success {
+        return Err(task_not_found(task_id));
+    }
+    write_stdout(&format!("Deleted task {archived_id}\n"))?;
+    if !deletion.cleaned_task_ids.is_empty() {
+        write_stdout(&format!(
+            "Removed references to {archived_id} from {}\n",
+            deletion.cleaned_task_ids.join(", ")
+        ))?;
+    }
+    Ok(())
+}
+
+fn task_not_found(task_id: &str) -> String {
+    format!(
+        "Task {task_id} not found. Task lookups read only the local working copy; use 'backlog browser' to see tasks from other branches."
+    )
+}
+
+fn lifecycle_error(error: crate::task_store::TaskStoreError, prefix: &str) -> String {
+    use crate::task_store::TaskStoreError;
+    match error {
+        TaskStoreError::HasSubtasks {
+            id: stored_id,
+            child_ids,
+        } => format!(
+            "Task {stored_id} cannot be deleted while its subtasks exist: {}.",
+            child_ids
+                .iter()
+                .map(|child| canonical_task_id(child, prefix))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        error => error.to_string(),
+    }
 }
 
 fn normalized_create_values(values: Vec<String>) -> Vec<String> {

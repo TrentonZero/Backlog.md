@@ -861,6 +861,221 @@ fn rust_task_edit_explicit_clears_match_live_typescript() {
 }
 
 #[test]
+fn rust_task_archive_restore_help_and_transitions_match_live_typescript() {
+    let expected_fixture = fixture();
+    let actual_fixture = fixture();
+    for (args, action) in [
+        (&["task", "archive", "1"][..], "archive"),
+        (&["task", "restore", "1"][..], "restore"),
+    ] {
+        let expected = typescript_cli(args, &expected_fixture.0);
+        let actual = rust_cli(args, &actual_fixture.0);
+        assert_eq!(actual.status.code(), expected.status.code(), "{action}");
+        assert_eq!(actual.stdout, expected.stdout, "{action}");
+        assert_eq!(actual.stderr, expected.stderr, "{action}");
+        let expected_dir = if action == "archive" {
+            "backlog/archive/tasks"
+        } else {
+            "backlog/tasks"
+        };
+        let actual_dir = actual_fixture.0.join(expected_dir);
+        let expected_dir = expected_fixture.0.join(expected_dir);
+        let actual_file = std::fs::read_dir(actual_dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .find(|entry| entry.file_name().to_string_lossy().contains("task-1"))
+            .unwrap()
+            .path();
+        let expected_file = std::fs::read_dir(expected_dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .find(|entry| entry.file_name().to_string_lossy().contains("task-1"))
+            .unwrap()
+            .path();
+        assert_eq!(
+            std::fs::read(actual_file).unwrap(),
+            std::fs::read(expected_file).unwrap(),
+            "{action}"
+        );
+        if action == "archive" {
+            let repeated_args = ["task", "archive", "1"];
+            let expected = typescript_cli(&repeated_args, &expected_fixture.0);
+            let actual = rust_cli(&repeated_args, &actual_fixture.0);
+            assert_eq!(actual.status.code(), expected.status.code());
+            assert_eq!(actual.stdout, expected.stdout);
+            assert_eq!(actual.stderr, expected.stderr);
+        }
+    }
+    for command in ["archive", "restore", "delete"] {
+        let output = rust_cli(&["task", command, "--help"], &actual_fixture.0);
+        assert!(output.status.success(), "{command}");
+        let help = String::from_utf8_lossy(&output.stdout)
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase();
+        let required_copy: &[&str] = match command {
+            "archive" => &[
+                "id stays reserved",
+                "dependencies",
+                "no other task is changed",
+            ],
+            "restore" => &["same id", "status it had", "archived tasks are read-only"],
+            "delete" => &["other tasks and drafts", "subtasks", "no prompt"],
+            _ => unreachable!(),
+        };
+        for phrase in required_copy {
+            assert!(help.contains(phrase), "{command} help lacks {phrase}");
+        }
+    }
+}
+
+#[test]
+fn rust_task_delete_cleans_task_links_and_matches_live_typescript() {
+    let expected_fixture = fixture();
+    let actual_fixture = fixture();
+    for fixture in [&expected_fixture, &actual_fixture] {
+        let task_path = fixture.0.join("backlog/tasks/task-1-first.md");
+        let task_source = std::fs::read_to_string(&task_path).unwrap();
+        std::fs::create_dir_all(fixture.0.join("backlog/archive/tasks")).unwrap();
+        std::fs::write(
+            fixture.0.join("backlog/archive/tasks/task-1-first.md"),
+            task_source,
+        )
+        .unwrap();
+        std::fs::remove_file(task_path).unwrap();
+        fixture.file(
+            "backlog/tasks/task-2-second.md",
+            "---\nid: task-2\ntitle: Second task\nstatus: Done\ndependencies:\n  - task-1\ncreated_date: 2026-01-02\n---\n",
+        );
+        fixture.file(
+            "backlog/drafts/draft-1 - Draft.md",
+            "---\nid: DRAFT-1\ntitle: Draft\nstatus: Draft\ncreated_date: 2026-01-03\ndependencies:\n  - task-1\n---\nDraft body\n",
+        );
+    }
+    let args = ["task", "delete", "1"];
+    let expected = typescript_cli(&args, &expected_fixture.0);
+    let actual = rust_cli(&args, &actual_fixture.0);
+    assert_eq!(actual.status.code(), expected.status.code());
+    assert_eq!(actual.stdout, expected.stdout);
+    assert_eq!(actual.stderr, expected.stderr);
+    assert_eq!(
+        std::fs::read_dir(actual_fixture.0.join("backlog/archive/tasks"))
+            .unwrap()
+            .count(),
+        0
+    );
+    let actual_dependent =
+        std::fs::read_to_string(actual_fixture.0.join("backlog/tasks/task-2-second.md")).unwrap();
+    let expected_dependent =
+        std::fs::read_to_string(expected_fixture.0.join("backlog/tasks/task-2-second.md")).unwrap();
+    assert_eq!(
+        backlog_md::records::parse_task(&actual_dependent)
+            .unwrap()
+            .dependencies,
+        backlog_md::records::parse_task(&expected_dependent)
+            .unwrap()
+            .dependencies
+    );
+    let actual_draft =
+        std::fs::read_to_string(actual_fixture.0.join("backlog/drafts/draft-1 - Draft.md"))
+            .unwrap();
+    assert!(actual_draft.contains("dependencies: []"));
+    assert!(actual_draft.contains("Draft body"));
+}
+
+#[test]
+fn rust_task_lifecycle_wrong_state_and_missing_errors_match_live_typescript() {
+    for args in [
+        vec!["task", "archive", "404"],
+        vec!["task", "restore", "404"],
+        vec!["task", "restore", "1"],
+        vec!["task", "delete", "1"],
+        vec!["task", "delete", "404"],
+    ] {
+        let expected_fixture = fixture();
+        let actual_fixture = fixture();
+        let expected = typescript_cli(&args, &expected_fixture.0);
+        let actual = rust_cli(&args, &actual_fixture.0);
+        assert_eq!(actual.status.code(), expected.status.code(), "{args:?}");
+        assert_eq!(actual.stdout, expected.stdout, "{args:?}");
+        assert_eq!(actual.stderr, expected.stderr, "{args:?}");
+        assert_eq!(
+            std::fs::read(expected_fixture.0.join("backlog/tasks/task-1-first.md")).unwrap(),
+            std::fs::read(actual_fixture.0.join("backlog/tasks/task-1-first.md")).unwrap(),
+            "{args:?}"
+        );
+    }
+}
+
+#[test]
+fn rust_task_delete_subtask_guard_matches_live_typescript() {
+    let expected_fixture = fixture();
+    let actual_fixture = fixture();
+    for fixture in [&expected_fixture, &actual_fixture] {
+        fixture.file(
+            "backlog/tasks/task-2-second.md",
+            "---\nid: task-2\ntitle: Second task\nstatus: Done\nparent_task_id: task-1\ncreated_date: 2026-01-02\n---\n",
+        );
+        let source =
+            std::fs::read_to_string(fixture.0.join("backlog/tasks/task-1-first.md")).unwrap();
+        fixture.file("backlog/archive/tasks/task-1-first.md", &source);
+        std::fs::remove_file(fixture.0.join("backlog/tasks/task-1-first.md")).unwrap();
+    }
+    let args = ["task", "delete", "1"];
+    let expected = typescript_cli(&args, &expected_fixture.0);
+    let actual = rust_cli(&args, &actual_fixture.0);
+    assert_eq!(actual.status.code(), expected.status.code());
+    assert_eq!(actual.stdout, expected.stdout);
+    assert_eq!(actual.stderr, expected.stderr);
+    assert_eq!(
+        std::fs::read(
+            actual_fixture
+                .0
+                .join("backlog/archive/tasks/task-1-first.md")
+        )
+        .unwrap(),
+        std::fs::read(
+            expected_fixture
+                .0
+                .join("backlog/archive/tasks/task-1-first.md")
+        )
+        .unwrap()
+    );
+}
+
+#[test]
+fn rust_task_archive_refuses_ambiguous_identity_without_writes() {
+    let expected_fixture = fixture();
+    let actual_fixture = fixture();
+    for fixture in [&expected_fixture, &actual_fixture] {
+        let active = fixture.0.join("backlog/tasks/task-1-first.md");
+        let archived = fixture.0.join("backlog/archive/tasks/task-1-first.md");
+        std::fs::create_dir_all(archived.parent().unwrap()).unwrap();
+        std::fs::copy(active, archived).unwrap();
+    }
+    let args = ["task", "archive", "1"];
+    let expected = typescript_cli(&args, &expected_fixture.0);
+    let actual = rust_cli(&args, &actual_fixture.0);
+    assert_eq!(actual.status.code(), expected.status.code());
+    assert_eq!(actual.stdout, expected.stdout);
+    let actual_stderr = String::from_utf8_lossy(&actual.stderr)
+        .replace(&actual_fixture.0.to_string_lossy().to_string(), "<ROOT>");
+    let expected_stderr = String::from_utf8_lossy(&expected.stderr)
+        .replace(&expected_fixture.0.to_string_lossy().to_string(), "<ROOT>");
+    assert_eq!(actual_stderr, expected_stderr);
+    for relative in [
+        "backlog/tasks/task-1-first.md",
+        "backlog/archive/tasks/task-1-first.md",
+    ] {
+        assert_eq!(
+            std::fs::read(actual_fixture.0.join(relative)).unwrap(),
+            std::fs::read(expected_fixture.0.join(relative)).unwrap()
+        );
+    }
+}
+
+#[test]
 fn rust_cli_help_and_version_are_available_without_a_project() {
     let fixture = Fixture::new();
     for args in [
