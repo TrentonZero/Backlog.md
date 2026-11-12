@@ -4161,3 +4161,294 @@ fn rust_decision_edit_matches_typescript_source_preservation_and_refusals() {
         );
     }
 }
+
+#[test]
+fn rust_decision_lifecycle_matches_typescript_changes_backlinks_and_id_release() {
+    const ACTIVE: &str = "backlog/decisions/decision-1 - Field-Guide.md";
+    const ARCHIVED: &str = "backlog/archive/decisions/decision-1 - Field-Guide.md";
+    const SOURCE: &str = "---\nid: decision-1\ntitle: Field Guide\ndate: 2026-01-01\ncustom: retained\n---\nOriginal decision body\n";
+    const TASK: &str = "backlog/tasks/task-1-first.md";
+    const DRAFT: &str = "backlog/drafts/draft-1 - Linked-Draft.md";
+    let reference = Fixture::new();
+    let candidate = Fixture::new();
+    for fixture in [&reference, &candidate] {
+        fixture.file(ACTIVE, SOURCE);
+        fixture.file(
+            TASK,
+            "---\nid: task-1\ntitle: First task\nstatus: To Do\npriority: high\ncreated_date: 2026-01-01\ndocumentation:\n  - backlog/decisions/decision-1 - Field-Guide.md\n  - backlog/archive/decisions/decision-1 - Field-Guide.md\n---\n",
+        );
+        fixture.file(
+            DRAFT,
+            "---\nid: DRAFT-1\ntitle: Linked Draft\nstatus: Draft\ncreated_date: 2026-01-04\ndocumentation:\n  - ./backlog/decisions/decision-1 - Field-Guide.md#heading\n---\n",
+        );
+    }
+    let task_before = std::fs::read(candidate.0.join(TASK)).unwrap();
+    let draft_before = std::fs::read(candidate.0.join(DRAFT)).unwrap();
+
+    for (args, old_path, new_path) in [
+        (&["decision", "archive", "1"][..], ACTIVE, ARCHIVED),
+        (
+            &["decision", "restore", "decision-001"][..],
+            ARCHIVED,
+            ACTIVE,
+        ),
+        (&["decision", "archive", "decision-1"][..], ACTIVE, ARCHIVED),
+        (&["decision", "delete", "1"][..], ARCHIVED, ""),
+    ] {
+        let (expected, actual) = assert_cli_process_parity(args, &reference, &candidate);
+        assert_eq!(actual.status.code(), expected.status.code());
+        assert!(!candidate.0.join(old_path).exists(), "args: {args:?}");
+        if new_path.is_empty() {
+            assert!(!candidate.0.join(ARCHIVED).exists());
+        } else {
+            assert_eq!(
+                std::fs::read(candidate.0.join(new_path)).unwrap(),
+                SOURCE.as_bytes()
+            );
+        }
+    }
+    assert_eq!(std::fs::read(candidate.0.join(TASK)).unwrap(), task_before);
+    assert_eq!(
+        std::fs::read(candidate.0.join(DRAFT)).unwrap(),
+        draft_before
+    );
+    assert_cli_process_parity(
+        &["decision", "create", "Replacement after deletion"],
+        &reference,
+        &candidate,
+    );
+    assert!(
+        candidate
+            .0
+            .join("backlog/decisions/decision-1 - Replacement-after-deletion.md")
+            .exists()
+    );
+}
+
+#[test]
+fn rust_decision_lifecycle_refuses_wrong_state_missing_ambiguous_and_colliding_paths() {
+    const ACTIVE: &str = "backlog/decisions/decision-1 - Field-Guide.md";
+    const ARCHIVED: &str = "backlog/archive/decisions/decision-1 - Field-Guide.md";
+    const SOURCE: &str =
+        "---\nid: decision-1\ntitle: Field Guide\ndate: 2026-01-01\n---\nOriginal body\n";
+    let reference = Fixture::new();
+    let candidate = Fixture::new();
+    for fixture in [&reference, &candidate] {
+        fixture.file(ACTIVE, SOURCE);
+    }
+    for args in [
+        &["decision", "delete", "1"][..],
+        &["decision", "restore", "1"][..],
+        &["decision", "archive", "404"][..],
+        &["decision", "restore", "404"][..],
+        &["decision", "delete", "404"][..],
+    ] {
+        assert_cli_process_parity(args, &reference, &candidate);
+    }
+
+    for fixture in [&reference, &candidate] {
+        fixture.file(ARCHIVED, SOURCE);
+    }
+    for args in [
+        &["decision", "archive", "1"][..],
+        &["decision", "restore", "1"][..],
+        &["decision", "delete", "1"][..],
+    ] {
+        assert_cli_process_parity(args, &reference, &candidate);
+    }
+
+    let collision = SOURCE.replace("decision-1", "decision-9");
+    for fixture in [&reference, &candidate] {
+        std::fs::remove_file(fixture.0.join(ARCHIVED)).unwrap();
+        fixture.file(ARCHIVED, &collision);
+    }
+    assert_cli_process_parity(&["decision", "archive", "1"], &reference, &candidate);
+
+    for fixture in [&reference, &candidate] {
+        std::fs::remove_file(fixture.0.join(ARCHIVED)).unwrap();
+    }
+    assert_cli_process_parity(&["decision", "archive", "1"], &reference, &candidate);
+    for fixture in [&reference, &candidate] {
+        fixture.file(ACTIVE, &collision);
+    }
+    assert_cli_process_parity(&["decision", "restore", "1"], &reference, &candidate);
+
+    let ambiguous_reference = Fixture::new();
+    let ambiguous_candidate = Fixture::new();
+    for fixture in [&ambiguous_reference, &ambiguous_candidate] {
+        fixture.file(ACTIVE, SOURCE);
+        fixture.file(
+            "backlog/archive/decisions/decision-001 - Duplicate.md",
+            SOURCE,
+        );
+    }
+    for args in [
+        &["decision", "archive", "1"][..],
+        &["decision", "restore", "1"][..],
+        &["decision", "delete", "1"][..],
+    ] {
+        assert_cli_process_parity(args, &ambiguous_reference, &ambiguous_candidate);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn rust_decision_lifecycle_moves_and_deletes_symlinks_without_changing_targets() {
+    use std::os::unix::fs::symlink;
+
+    const ACTIVE: &str = "backlog/decisions/decision-1 - Linked.md";
+    const ARCHIVED: &str = "backlog/archive/decisions/decision-1 - Linked.md";
+    const TARGET: &str = "outside/decision.md";
+    const SOURCE: &str =
+        "---\nid: decision-1\ntitle: Linked\ndate: 2026-01-01\n---\nSymlink target\n";
+    let reference = Fixture::new();
+    let candidate = Fixture::new();
+    for fixture in [&reference, &candidate] {
+        fixture.file(TARGET, SOURCE);
+        let link = fixture.0.join(ACTIVE);
+        std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+        symlink("../../outside/decision.md", &link).unwrap();
+    }
+    for (args, old_path, new_path) in [
+        (&["decision", "archive", "1"][..], ACTIVE, ARCHIVED),
+        (&["decision", "restore", "1"][..], ARCHIVED, ACTIVE),
+        (&["decision", "archive", "1"][..], ACTIVE, ARCHIVED),
+    ] {
+        assert_cli_process_parity(args, &reference, &candidate);
+        for fixture in [&reference, &candidate] {
+            assert!(!fixture.0.join(old_path).exists());
+            assert!(
+                std::fs::symlink_metadata(fixture.0.join(new_path))
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+            );
+            assert_eq!(
+                std::fs::read(fixture.0.join(TARGET)).unwrap(),
+                SOURCE.as_bytes()
+            );
+        }
+    }
+    assert_cli_process_parity(&["decision", "delete", "1"], &reference, &candidate);
+    for fixture in [&reference, &candidate] {
+        assert!(std::fs::symlink_metadata(fixture.0.join(ARCHIVED)).is_err());
+        assert_eq!(
+            std::fs::read(fixture.0.join(TARGET)).unwrap(),
+            SOURCE.as_bytes()
+        );
+    }
+}
+
+#[test]
+fn rust_decision_lifecycle_auto_commit_stages_only_selected_paths() {
+    const ACTIVE: &str = "backlog/decisions/decision-1 - Field-Guide.md";
+    const ARCHIVED: &str = "backlog/archive/decisions/decision-1 - Field-Guide.md";
+    const SOURCE: &str =
+        "---\nid: decision-1\ntitle: Field Guide\ndate: 2026-01-01\n---\nOriginal body\n";
+    let reference = Fixture::new();
+    let candidate = Fixture::new();
+    for fixture in [&reference, &candidate] {
+        fixture.file(ACTIVE, SOURCE);
+        let configured = typescript_cli(&["config", "set", "autoCommit", "true"], &fixture.0);
+        assert!(configured.status.success());
+        initialize_git_fixture(fixture);
+        fixture.file("STAGED.txt", "staged user change\n");
+        git(&fixture.0, &["add", "STAGED.txt"]);
+        fixture.file("UNTRACKED.txt", "untracked user change\n");
+    }
+
+    for (args, message, paths) in [
+        (
+            &["decision", "archive", "1"][..],
+            "backlog: Archive decision decision-1",
+            format!("{ARCHIVED}\n{ACTIVE}"),
+        ),
+        (
+            &["decision", "restore", "decision-1"][..],
+            "backlog: Restore decision decision-1",
+            format!("{ARCHIVED}\n{ACTIVE}"),
+        ),
+        (
+            &["decision", "archive", "decision-1"][..],
+            "backlog: Archive decision decision-1",
+            format!("{ARCHIVED}\n{ACTIVE}"),
+        ),
+        (
+            &["decision", "delete", "1"][..],
+            "backlog: Delete decision decision-1",
+            ARCHIVED.to_string(),
+        ),
+    ] {
+        assert_cli_process_parity(args, &reference, &candidate);
+        let expected = selected_commit_result(&reference);
+        let actual = selected_commit_result(&candidate);
+        assert_eq!(actual, expected, "args: {args:?}");
+        assert_eq!(actual.0, message, "args: {args:?}");
+        assert_eq!(actual.1, paths, "args: {args:?}");
+        assert_eq!(actual.2, "STAGED.txt\nUNRELATED.txt", "args: {args:?}");
+        assert_eq!(
+            git(&candidate.0, &["status", "--porcelain"]),
+            git(&reference.0, &["status", "--porcelain"]),
+            "args: {args:?}"
+        );
+    }
+}
+
+#[test]
+fn rust_decision_lifecycle_keeps_applied_change_when_auto_commit_fails() {
+    const ACTIVE: &str = "backlog/decisions/decision-1 - Field-Guide.md";
+    const ARCHIVED: &str = "backlog/archive/decisions/decision-1 - Field-Guide.md";
+    const SOURCE: &str =
+        "---\nid: decision-1\ntitle: Field Guide\ndate: 2026-01-01\n---\nOriginal body\n";
+    for (args, initially_archived, expected_path) in [
+        (&["decision", "archive", "1"][..], false, ARCHIVED),
+        (&["decision", "restore", "1"][..], true, ACTIVE),
+        (&["decision", "delete", "1"][..], true, ""),
+    ] {
+        let reference = Fixture::new();
+        let candidate = Fixture::new();
+        for fixture in [&reference, &candidate] {
+            fixture.file(if initially_archived { ARCHIVED } else { ACTIVE }, SOURCE);
+            let configured = typescript_cli(&["config", "set", "autoCommit", "true"], &fixture.0);
+            assert!(configured.status.success());
+            initialize_git_fixture(fixture);
+            std::fs::create_dir_all(fixture.0.join(".git")).unwrap();
+            std::fs::write(fixture.0.join(".git/index.lock"), "").unwrap();
+        }
+        let expected = typescript_cli(args, &reference.0);
+        let actual = rust_cli(args, &candidate.0);
+        assert_eq!(
+            actual.status.code(),
+            expected.status.code(),
+            "args: {args:?}"
+        );
+        assert_eq!(actual.stdout, expected.stdout, "args: {args:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&actual.stderr)
+                .replace(&candidate.0.to_string_lossy().to_string(), "<ROOT>"),
+            String::from_utf8_lossy(&expected.stderr)
+                .replace(&reference.0.to_string_lossy().to_string(), "<ROOT>"),
+            "args: {args:?}"
+        );
+        assert!(
+            String::from_utf8_lossy(&expected.stderr).contains("committing the change failed"),
+            "{}",
+            String::from_utf8_lossy(&expected.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&actual.stderr).contains("committing the change failed"),
+            "{}",
+            String::from_utf8_lossy(&actual.stderr)
+        );
+        if expected_path.is_empty() {
+            assert!(!reference.0.join(ARCHIVED).exists());
+            assert!(!candidate.0.join(ARCHIVED).exists());
+        } else {
+            assert_eq!(
+                std::fs::read(candidate.0.join(expected_path)).unwrap(),
+                SOURCE.as_bytes(),
+                "args: {args:?}"
+            );
+        }
+    }
+}

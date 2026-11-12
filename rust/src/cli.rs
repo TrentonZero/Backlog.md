@@ -87,6 +87,12 @@ enum DecisionCommand {
         #[command(flatten)]
         options: DecisionViewArgs,
     },
+    /// Move a decision into the archive, keeping its ID reserved.
+    Archive { decision_id: String },
+    /// Move an archived decision back to the decisions folder.
+    Restore { decision_id: String },
+    /// Permanently delete an archived decision without prompting.
+    Delete { decision_id: String },
 }
 
 #[derive(Debug, Args)]
@@ -803,11 +809,27 @@ pub fn run() -> Result<(), String> {
                     options,
                 },
         } => run_decision_view(&decision_id, options),
+        Command::Decision {
+            command: DecisionCommand::Archive { decision_id },
+        } => run_decision_lifecycle(&decision_id, DecisionLifecycleOperation::Archive),
+        Command::Decision {
+            command: DecisionCommand::Restore { decision_id },
+        } => run_decision_lifecycle(&decision_id, DecisionLifecycleOperation::Restore),
+        Command::Decision {
+            command: DecisionCommand::Delete { decision_id },
+        } => run_decision_lifecycle(&decision_id, DecisionLifecycleOperation::Delete),
     }
 }
 
 #[derive(Clone, Copy)]
 enum DocumentLifecycleOperation {
+    Archive,
+    Restore,
+    Delete,
+}
+
+#[derive(Clone, Copy)]
+enum DecisionLifecycleOperation {
     Archive,
     Restore,
     Delete,
@@ -3072,7 +3094,7 @@ fn document_update_commit_error(
     format!("Git command failed (exit code {exit_code}): git add {relative_path}\n{stderr}\n")
 }
 
-fn document_lifecycle_stage_error(
+fn content_record_lifecycle_stage_error(
     error: String,
     project_root: &std::path::Path,
     path: &std::path::Path,
@@ -3152,7 +3174,7 @@ fn run_document_lifecycle(
             &paths,
         )
         .map_err(|error| {
-            let error = document_lifecycle_stage_error(error, &context.root, stage_path);
+            let error = content_record_lifecycle_stage_error(error, &context.root, stage_path);
             format!(
                 "Document {} was {verb}, but committing the change failed: {error}",
                 change.id
@@ -3166,6 +3188,84 @@ fn run_document_lifecycle(
         DocumentLifecycleOperation::Delete => "Deleted",
     };
     write_stdout(&format!("{confirmation} document {}\n", change.id))?;
+    if !change.listed_as_documentation_by.is_empty() {
+        write_stdout(&format!(
+            "Still listed as documentation by: {}\n",
+            change.listed_as_documentation_by.join(", ")
+        ))?;
+    }
+    Ok(())
+}
+
+fn run_decision_lifecycle(
+    decision_id: &str,
+    operation: DecisionLifecycleOperation,
+) -> Result<(), String> {
+    let context = project_context()?;
+    let store = DecisionStore::new(&context.root, &context.backlog_directory, &context.prefix);
+    let before = store
+        .get_decision(decision_id)
+        .map_err(|error| error.to_string())?;
+    let change = match operation {
+        DecisionLifecycleOperation::Archive => store.archive_decision(decision_id),
+        DecisionLifecycleOperation::Restore => store.restore_decision(decision_id),
+        DecisionLifecycleOperation::Delete => store.delete_decision(decision_id),
+    }
+    .map_err(|error| error.to_string())?
+    .ok_or_else(|| format!("Decision not found: {decision_id}"))?;
+
+    if context.config.auto_commit == Some(true) && context.config.filesystem_only != Some(true) {
+        let before = before.ok_or_else(|| format!("Decision not found: {decision_id}"))?;
+        let mut paths = vec![before.path.clone()];
+        match operation {
+            DecisionLifecycleOperation::Archive | DecisionLifecycleOperation::Restore => {
+                let after = store
+                    .get_decision(&change.id)
+                    .map_err(|error| error.to_string())?
+                    .ok_or_else(|| format!("Decision not found: {}", change.id))?;
+                paths.push(after.path);
+            }
+            DecisionLifecycleOperation::Delete => {
+                let archive_directory = context
+                    .root
+                    .join(&context.backlog_directory)
+                    .join("archive/decisions");
+                let decisions_directory = context
+                    .root
+                    .join(&context.backlog_directory)
+                    .join("decisions");
+                let relative = before
+                    .path
+                    .strip_prefix(&archive_directory)
+                    .map_err(|error| error.to_string())?;
+                paths.push(decisions_directory.join(relative));
+            }
+        }
+        let (verb, commit_verb, stage_path) = match operation {
+            DecisionLifecycleOperation::Archive => ("archived", "Archive", paths.last().unwrap()),
+            DecisionLifecycleOperation::Restore => ("restored", "Restore", paths.last().unwrap()),
+            DecisionLifecycleOperation::Delete => ("deleted", "Delete", paths.first().unwrap()),
+        };
+        commit_record_change(
+            &context,
+            &format!("backlog: {commit_verb} decision {}", change.id),
+            &paths,
+        )
+        .map_err(|error| {
+            let error = content_record_lifecycle_stage_error(error, &context.root, stage_path);
+            format!(
+                "Decision {} was {verb}, but committing the change failed: {error}",
+                change.id
+            )
+        })?;
+    }
+
+    let confirmation = match operation {
+        DecisionLifecycleOperation::Archive => "Archived",
+        DecisionLifecycleOperation::Restore => "Restored",
+        DecisionLifecycleOperation::Delete => "Deleted",
+    };
+    write_stdout(&format!("{confirmation} decision {}\n", change.id))?;
     if !change.listed_as_documentation_by.is_empty() {
         write_stdout(&format!(
             "Still listed as documentation by: {}\n",
