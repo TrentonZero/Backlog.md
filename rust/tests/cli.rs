@@ -385,8 +385,12 @@ fn rust_task_create_hook_failure_matches_typescript_file_and_index_state() {
     assert!(actual_stderr.contains("previous index entries were restored"));
     assert!(!actual_stderr.contains("remain in the working tree"));
     assert_eq!(
-        git(&actual_fixture.0, &["rev-parse", "HEAD"]),
-        git(&expected_fixture.0, &["rev-parse", "HEAD"])
+        git(&actual_fixture.0, &["log", "-1", "--format=%s"]),
+        "Baseline"
+    );
+    assert_eq!(
+        git(&expected_fixture.0, &["log", "-1", "--format=%s"]),
+        "Baseline"
     );
     assert_eq!(
         git(&actual_fixture.0, &["diff", "--cached", "--name-only"]),
@@ -2619,6 +2623,249 @@ fn rust_task_lifecycle_wrong_state_and_missing_errors_match_live_typescript() {
             std::fs::read(actual_fixture.0.join("backlog/tasks/task-1-first.md")).unwrap(),
             "{args:?}"
         );
+    }
+}
+
+#[test]
+fn rust_draft_archive_and_promote_match_live_typescript() {
+    for (action, expected_directory) in [
+        ("archive", "backlog/archive/drafts"),
+        ("promote", "backlog/tasks"),
+    ] {
+        let expected_fixture = Fixture::new();
+        let actual_fixture = Fixture::new();
+        for fixture in [&expected_fixture, &actual_fixture] {
+            fixture.file(
+                "backlog/drafts/draft-1-first.md",
+                "---\nid: draft-1\ntitle: First draft\nstatus: Draft\ncreated_date: 2026-01-01\ncustom_field: preserve\n---\nDraft body.\n",
+            );
+        }
+        let args = ["draft", action, "1"];
+        let expected = typescript_cli(&args, &expected_fixture.0);
+        let actual = rust_cli(&args, &actual_fixture.0);
+        assert_eq!(actual.status.code(), expected.status.code(), "{action}");
+        assert_eq!(actual.stdout, expected.stdout, "{action}");
+        assert_eq!(actual.stderr, expected.stderr, "{action}");
+        assert!(
+            !actual_fixture
+                .0
+                .join("backlog/drafts/draft-1-first.md")
+                .exists()
+        );
+        let actual_path = std::fs::read_dir(actual_fixture.0.join(expected_directory))
+            .unwrap()
+            .filter_map(Result::ok)
+            .next()
+            .unwrap()
+            .path();
+        let expected_path = std::fs::read_dir(expected_fixture.0.join(expected_directory))
+            .unwrap()
+            .filter_map(Result::ok)
+            .next()
+            .unwrap()
+            .path();
+        if action == "archive" {
+            assert_eq!(
+                std::fs::read(actual_path).unwrap(),
+                std::fs::read(expected_path).unwrap(),
+                "{action}"
+            );
+        } else {
+            let actual =
+                backlog_md::records::parse_task(&std::fs::read_to_string(actual_path).unwrap())
+                    .unwrap();
+            let expected =
+                backlog_md::records::parse_task(&std::fs::read_to_string(expected_path).unwrap())
+                    .unwrap();
+            assert_eq!(actual, expected, "{action}");
+        }
+    }
+}
+
+#[test]
+fn rust_task_demote_matches_live_typescript_and_cleans_links() {
+    let expected_fixture = fixture();
+    let actual_fixture = fixture();
+    for fixture in [&expected_fixture, &actual_fixture] {
+        fixture.file(
+            "backlog/tasks/task-2-second.md",
+            "---\nid: task-2\ntitle: Second task\nstatus: To Do\ndependencies:\n  - task-1\nreferences:\n  - task-1\ncreated_date: 2026-01-02\n---\nDependent body.\n",
+        );
+    }
+    let args = ["task", "demote", "1"];
+    let expected = typescript_cli(&args, &expected_fixture.0);
+    let actual = rust_cli(&args, &actual_fixture.0);
+    assert_eq!(actual.status.code(), expected.status.code());
+    assert_eq!(actual.stdout, expected.stdout);
+    assert_eq!(actual.stderr, expected.stderr);
+    assert!(
+        !actual_fixture
+            .0
+            .join("backlog/tasks/task-1-first.md")
+            .exists()
+    );
+    let demoted_path = std::fs::read_dir(actual_fixture.0.join("backlog/drafts"))
+        .unwrap()
+        .filter_map(Result::ok)
+        .next()
+        .unwrap()
+        .path();
+    let expected_demoted_path = std::fs::read_dir(expected_fixture.0.join("backlog/drafts"))
+        .unwrap()
+        .filter_map(Result::ok)
+        .next()
+        .unwrap()
+        .path();
+    let actual_demoted =
+        backlog_md::records::parse_task(&std::fs::read_to_string(demoted_path).unwrap()).unwrap();
+    let expected_demoted =
+        backlog_md::records::parse_task(&std::fs::read_to_string(expected_demoted_path).unwrap())
+            .unwrap();
+    assert_eq!(actual_demoted, expected_demoted);
+    let actual_dependent = backlog_md::records::parse_task(
+        &std::fs::read_to_string(actual_fixture.0.join("backlog/tasks/task-2-second.md")).unwrap(),
+    )
+    .unwrap();
+    let expected_dependent = backlog_md::records::parse_task(
+        &std::fs::read_to_string(expected_fixture.0.join("backlog/tasks/task-2-second.md"))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(actual_dependent, expected_dependent);
+    assert!(actual_dependent.dependencies.is_empty());
+    assert!(actual_dependent.references.is_empty());
+}
+
+#[test]
+fn rust_draft_archive_promote_and_task_demote_auto_commit_only_changed_paths() {
+    for (command, record) in [
+        (vec!["draft", "archive", "1"], "draft"),
+        (vec!["draft", "promote", "1"], "draft"),
+        (vec!["task", "demote", "1"], "task"),
+    ] {
+        let expected_fixture = Fixture::new();
+        let actual_fixture = Fixture::new();
+        for fixture in [&expected_fixture, &actual_fixture] {
+            let config = "project_name: CLI Fixture\ntask_prefix: task\nstatuses:\n  - To Do\n  - Done\npriorities:\n  - High\n  - Low\nauto_commit: true\n";
+            fixture.file("backlog.config.yml", config);
+            fixture.file(
+                "backlog/drafts/draft-1-first.md",
+                "---\nid: draft-1\ntitle: First draft\nstatus: Draft\ncreated_date: 2026-01-01\n---\nDraft body.\n",
+            );
+            if record == "task" {
+                fixture.file(
+                    "backlog/tasks/task-1-first.md",
+                    "---\nid: task-1\ntitle: First task\nstatus: To Do\ncreated_date: 2026-01-01\n---\nTask body.\n",
+                );
+                fixture.file(
+                    "backlog/tasks/task-2-second.md",
+                    "---\nid: task-2\ntitle: Second task\nstatus: To Do\ndependencies:\n  - task-1\nreferences:\n  - task-1\ncreated_date: 2026-01-02\n---\nDependent body.\n",
+                );
+            }
+            initialize_git_fixture(fixture);
+        }
+        let expected = typescript_cli(&command, &expected_fixture.0);
+        let actual = rust_cli(&command, &actual_fixture.0);
+        assert_eq!(actual.status.code(), expected.status.code(), "{command:?}");
+        assert_eq!(actual.stdout, expected.stdout, "{command:?}");
+        assert_eq!(actual.stderr, expected.stderr, "{command:?}");
+        assert_eq!(
+            selected_commit_result(&actual_fixture),
+            selected_commit_result(&expected_fixture),
+            "{command:?}"
+        );
+        assert_eq!(
+            git(&actual_fixture.0, &["diff", "--cached", "--name-only"]),
+            "UNRELATED.txt",
+            "{command:?}"
+        );
+    }
+}
+
+#[test]
+fn rust_draft_lifecycle_identity_and_missing_errors_match_live_typescript() {
+    for args in [
+        &["draft", "archive", "404"][..],
+        &["draft", "promote", "404"][..],
+        &["task", "demote", "404"][..],
+    ] {
+        let expected_fixture = Fixture::new();
+        let actual_fixture = Fixture::new();
+        let expected = typescript_cli(args, &expected_fixture.0);
+        let actual = rust_cli(args, &actual_fixture.0);
+        assert_eq!(actual.status.code(), expected.status.code(), "{args:?}");
+        assert_eq!(actual.stdout, expected.stdout, "{args:?}");
+        assert_eq!(actual.stderr, expected.stderr, "{args:?}");
+    }
+
+    let expected_fixture = fixture();
+    let actual_fixture = fixture();
+    for fixture in [&expected_fixture, &actual_fixture] {
+        let source = fixture.0.join("backlog/tasks/task-1-first.md");
+        let archived = fixture.0.join("backlog/archive/tasks/task-1-first.md");
+        std::fs::create_dir_all(archived.parent().unwrap()).unwrap();
+        std::fs::rename(source, archived).unwrap();
+    }
+    let args = ["task", "demote", "1"];
+    let expected = typescript_cli(&args, &expected_fixture.0);
+    let actual = rust_cli(&args, &actual_fixture.0);
+    assert_eq!(actual.status.code(), expected.status.code());
+    assert_eq!(actual.stdout, expected.stdout);
+    assert_eq!(actual.stderr, expected.stderr);
+    assert!(
+        actual_fixture
+            .0
+            .join("backlog/archive/tasks/task-1-first.md")
+            .exists()
+    );
+    assert!(!actual_fixture.0.join("backlog/drafts").exists());
+
+    for action in ["archive", "promote"] {
+        let expected_fixture = Fixture::new();
+        let actual_fixture = Fixture::new();
+        for fixture in [&expected_fixture, &actual_fixture] {
+            fixture.file(
+                "backlog/drafts/draft-1-drifted.md",
+                "---\nid: draft-99\ntitle: Drifted draft\nstatus: Draft\ncreated_date: 2026-01-01\n---\nKeep this draft.\n",
+            );
+        }
+        let args = ["draft", action, "1"];
+        let expected = typescript_cli(&args, &expected_fixture.0);
+        let actual = rust_cli(&args, &actual_fixture.0);
+        assert_eq!(actual.status.code(), expected.status.code(), "{action}");
+        assert_eq!(actual.stdout, expected.stdout, "{action}");
+        assert_eq!(actual.stderr, expected.stderr, "{action}");
+    }
+
+    for action in ["archive", "promote"] {
+        let expected_fixture = Fixture::new();
+        let actual_fixture = Fixture::new();
+        for fixture in [&expected_fixture, &actual_fixture] {
+            fixture.file(
+                "backlog/drafts/draft-1-alpha.md",
+                "---\nid: draft-1\ntitle: Alpha\nstatus: Draft\ncreated_date: 2026-01-01\n---\n",
+            );
+            fixture.file(
+                "backlog/drafts/draft-01-beta.md",
+                "---\nid: draft-01\ntitle: Beta\nstatus: Draft\ncreated_date: 2026-01-02\n---\n",
+            );
+        }
+        let args = ["draft", action, "1"];
+        let expected = typescript_cli(&args, &expected_fixture.0);
+        let actual = rust_cli(&args, &actual_fixture.0);
+        assert_eq!(actual.status.code(), expected.status.code(), "{action}");
+        assert_eq!(actual.stdout, expected.stdout, "{action}");
+        assert_eq!(
+            String::from_utf8_lossy(&actual.stderr)
+                .replace(&actual_fixture.0.to_string_lossy().to_string(), "<ROOT>"),
+            String::from_utf8_lossy(&expected.stderr)
+                .replace(&expected_fixture.0.to_string_lossy().to_string(), "<ROOT>"),
+            "{action}"
+        );
+        for fixture in [&actual_fixture, &expected_fixture] {
+            assert!(fixture.0.join("backlog/drafts/draft-1-alpha.md").exists());
+            assert!(fixture.0.join("backlog/drafts/draft-01-beta.md").exists());
+        }
     }
 }
 

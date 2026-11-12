@@ -3,7 +3,8 @@
 This Cargo package contains the staged [Rust executable migration](../docs/superpowers/specs/2026-11-07-rust-migration-design.md).
 The `backlog` binary currently provides root help/version plus noninteractive
 `task create`, `task edit`, `task list`, `task view`, `task archive`,
-`task restore`, `task delete`, and draft list, create, view, and edit commands.
+`task restore`, `task delete`, `task demote`, and draft list, create, view, edit,
+archive, and promote commands.
 Task list/view and draft list support plain or JSON output; list commands support
 sorting and bounded output windows. Draft view/edit use plain detail output.
 Task and draft edit support shared fields, dependency links, references,
@@ -23,6 +24,8 @@ cargo run --manifest-path rust/Cargo.toml -- task view TASK-1 --json
 cargo run --manifest-path rust/Cargo.toml -- task create "Add tests" --parent TASK-1
 cargo run --manifest-path rust/Cargo.toml -- draft view DRAFT-1 --plain
 cargo run --manifest-path rust/Cargo.toml -- draft edit DRAFT-1 --title "Refined plan"
+cargo run --manifest-path rust/Cargo.toml -- draft promote DRAFT-1
+cargo run --manifest-path rust/Cargo.toml -- task demote TASK-1
 ```
 
 Use Rust 1.98 or later:

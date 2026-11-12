@@ -58,6 +58,7 @@ pub struct TaskDeletionResult {
 pub struct TaskDemotionResult {
     pub success: bool,
     pub cleaned_task_ids: Vec<String>,
+    pub changed_paths: Vec<PathBuf>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -452,6 +453,16 @@ impl TaskStore {
     /// Promote a unique draft while holding its file lock and the shared ID allocator lock.
     pub fn promote_draft(&self, id: &str, config: &Config) -> Result<bool, TaskStoreError> {
         self.promote_draft_inner(id, config, None)
+            .map(|paths| paths.is_some())
+    }
+
+    /// Promote a draft and return every path changed by the transition.
+    pub fn promote_draft_with_changes(
+        &self,
+        id: &str,
+        config: &Config,
+    ) -> Result<Option<Vec<PathBuf>>, TaskStoreError> {
+        self.promote_draft_inner(id, config, None)
     }
 
     /// Promote a draft for a status edit, validating links against its newly allocated task ID.
@@ -462,6 +473,7 @@ impl TaskStore {
         config: &Config,
     ) -> Result<bool, TaskStoreError> {
         self.promote_draft_inner(id, config, Some(status))
+            .map(|paths| paths.is_some())
     }
 
     fn promote_draft_inner(
@@ -469,10 +481,10 @@ impl TaskStore {
         id: &str,
         config: &Config,
         status_override: Option<&str>,
-    ) -> Result<bool, TaskStoreError> {
+    ) -> Result<Option<Vec<PathBuf>>, TaskStoreError> {
         let drafts = DraftStore::new(&self.project_root, &self.backlog_relative_directory);
         let Some(source_path) = drafts.resolve_path(id).map_err(draft_error)? else {
-            return Ok(false);
+            return Ok(None);
         };
         let filename_id = drafts.filename_id(&source_path).map_err(draft_error)?;
         let draft_lock = self
@@ -484,7 +496,7 @@ impl TaskStore {
             .acquire_create_lock()
             .map_err(|error| TaskStoreError::CreateLock(error.to_string()))?;
         let Some(current_path) = drafts.resolve_path(id).map_err(draft_error)? else {
-            return Ok(false);
+            return Ok(None);
         };
         if current_path != source_path {
             return Err(TaskStoreError::TaskLock(format!(
@@ -497,7 +509,7 @@ impl TaskStore {
             .map_err(|error| TaskStoreError::Storage(error.to_string()))?;
         let mut task = match records::parse_task(&original) {
             Ok(task) => task,
-            Err(_) => return Ok(false),
+            Err(_) => return Ok(None),
         };
         let existing_ids = self.occupied_task_ids(config);
         let existing_refs: Vec<_> = existing_ids.iter().map(String::as_str).collect();
@@ -547,7 +559,7 @@ impl TaskStore {
             let _ = fs::remove_file(&target);
             return Err(TaskStoreError::Storage(error.to_string()));
         }
-        Ok(true)
+        Ok(Some(vec![source_path, target]))
     }
 
     /// Demote an active task and clean other records before releasing its task ID.
@@ -581,6 +593,7 @@ impl TaskStore {
             return Ok(TaskDemotionResult {
                 success: false,
                 cleaned_task_ids: Vec::new(),
+                changed_paths: Vec::new(),
             });
         };
         for _ in 0..5 {
@@ -588,6 +601,7 @@ impl TaskStore {
                 return Ok(TaskDemotionResult {
                     success: false,
                     cleaned_task_ids: Vec::new(),
+                    changed_paths: Vec::new(),
                 });
             };
             let mut candidates = self.vacated_link_records(&current.task.id);
@@ -627,6 +641,7 @@ impl TaskStore {
                 return Ok(TaskDemotionResult {
                     success: false,
                     cleaned_task_ids: Vec::new(),
+                    changed_paths: Vec::new(),
                 });
             };
             if current_after_lock.path != current.path {
@@ -715,6 +730,7 @@ impl TaskStore {
                 return Err(TaskStoreError::Storage(error.to_string()));
             }
             let mut cleaned_task_ids = Vec::new();
+            let mut changed_paths = vec![target_draft, current.path];
             let records_to_clean: Vec<(&Path, &str)> = fresh
                 .tasks
                 .iter()
@@ -731,6 +747,7 @@ impl TaskStore {
                     self.clean_vacated_links(path, record_id, &current.task.id, &create_lock)?
                 {
                     cleaned_task_ids.push(cleaned_id);
+                    changed_paths.push(path.to_path_buf());
                 }
             }
             for lock in &task_locks {
@@ -747,6 +764,7 @@ impl TaskStore {
             return Ok(TaskDemotionResult {
                 success: true,
                 cleaned_task_ids,
+                changed_paths,
             });
         }
         Err(TaskStoreError::TaskLock(format!(
@@ -1110,6 +1128,11 @@ impl TaskStore {
             );
         }
         sort_entries(entries)
+    }
+
+    /// Resolve a unique archived task for lifecycle diagnostics.
+    pub fn load_archived_task(&self, id: &str) -> Result<Option<TaskFileEntry>, TaskStoreError> {
+        self.find_archived_task(id)
     }
 
     pub fn load_task(&self, id: &str) -> Result<Option<TaskFileEntry>, TaskStoreError> {

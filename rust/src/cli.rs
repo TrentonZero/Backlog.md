@@ -65,6 +65,10 @@ enum DraftCommand {
     },
     /// Edit one local draft.
     Edit(Box<TaskEditArgs>),
+    /// Archive a draft.
+    Archive { task_id: String },
+    /// Promote a draft to an active task.
+    Promote { task_id: String },
 }
 
 #[derive(Debug, Args)]
@@ -137,6 +141,8 @@ enum TaskCommand {
     Restore { task_id: String },
     /// Permanently removes an archived task and its ID when no other branch holds it. Removes links other tasks and drafts hold; requires archive first, refuses existing subtasks, and has no prompt.
     Delete { task_id: String },
+    /// Move an active task back to drafts.
+    Demote { task_id: String },
 }
 
 #[derive(Debug, Args)]
@@ -466,6 +472,9 @@ pub fn run() -> Result<(), String> {
         Command::Task {
             command: TaskCommand::Delete { task_id },
         } => run_task_delete(&task_id),
+        Command::Task {
+            command: TaskCommand::Demote { task_id },
+        } => run_task_demote(&task_id),
         Command::Draft {
             command: Some(DraftCommand::List(options)),
             ..
@@ -482,6 +491,14 @@ pub fn run() -> Result<(), String> {
             command: Some(DraftCommand::Edit(options)),
             ..
         } => run_draft_edit(*options),
+        Command::Draft {
+            command: Some(DraftCommand::Archive { task_id }),
+            ..
+        } => run_draft_archive(&task_id),
+        Command::Draft {
+            command: Some(DraftCommand::Promote { task_id }),
+            ..
+        } => run_draft_promote(&task_id),
         Command::Draft {
             command: None,
             task_id: Some(task_id),
@@ -1860,6 +1877,55 @@ fn run_task_delete(task_id: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn run_task_demote(task_id: &str) -> Result<(), String> {
+    let context = project_context()?;
+    let Some(task) = context
+        .store
+        .load_task(task_id)
+        .map_err(|error| error.to_string())?
+    else {
+        if let Some(archived) = context
+            .store
+            .load_archived_task(task_id)
+            .map_err(|error| lifecycle_error(error, &context.prefix))?
+        {
+            return Err(lifecycle_error(
+                crate::task_store::TaskStoreError::Archived(archived.task.id),
+                &context.prefix,
+            ));
+        }
+        return Err(task_not_found(task_id));
+    };
+    let id = canonical_task_id(&task.task.id, &context.prefix);
+    let demotion = context
+        .store
+        .demote_task(&id, &context.config)
+        .map_err(|error| lifecycle_error(error, &context.prefix))?;
+    if !demotion.success {
+        return Err(task_not_found(task_id));
+    }
+    commit_record_change(
+        &context,
+        &format!("backlog: Demote task {}", task.task.id),
+        &demotion.changed_paths,
+    )
+    .map_err(|error| {
+        format!(
+            "Task {} was demoted, but the change was not committed: {error}",
+            task.task.id
+        )
+    })?;
+    write_stdout(&format!("Demoted task {}\n", task.task.id))?;
+    if !demotion.cleaned_task_ids.is_empty() {
+        write_stdout(&format!(
+            "Removed references to {} from {}\n",
+            task.task.id,
+            demotion.cleaned_task_ids.join(", ")
+        ))?;
+    }
+    Ok(())
+}
+
 fn task_not_found(task_id: &str) -> String {
     format!(
         "Task {task_id} not found. Task lookups read only the local working copy; use 'backlog browser' to see tasks from other branches."
@@ -2220,6 +2286,56 @@ fn run_draft_view(task_id: &str, options: DraftViewArgs) -> Result<(), String> {
             true,
         )
     ))
+}
+
+fn run_draft_archive(task_id: &str) -> Result<(), String> {
+    let context = project_context()?;
+    let store = DraftStore::new(&context.root, &context.backlog_directory);
+    let source = store
+        .resolve_path(task_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("Draft {task_id} not found."))?;
+    let archived = context
+        .backlog_directory
+        .join("archive/drafts")
+        .join(source.file_name().unwrap_or_default());
+    if !store
+        .archive_draft(task_id)
+        .map_err(|error| error.to_string())?
+    {
+        return Err(format!("Draft {task_id} not found."));
+    }
+    let id = canonical_task_id(task_id, "draft");
+    commit_record_change(
+        &context,
+        &format!("backlog: Archive draft {id}"),
+        &[source, archived],
+    )
+    .map_err(|error| {
+        format!("Draft {id} was archived, but the change was not committed: {error}")
+    })?;
+    write_stdout(&format!("Archived draft {id}\n"))
+}
+
+fn run_draft_promote(task_id: &str) -> Result<(), String> {
+    let context = project_context()?;
+    let id = canonical_task_id(task_id, "draft");
+    let Some(changed_paths) = context
+        .store
+        .promote_draft_with_changes(&id, &context.config)
+        .map_err(|error| lifecycle_error(error, &context.prefix))?
+    else {
+        return Err(format!("Draft {task_id} not found."));
+    };
+    commit_record_change(
+        &context,
+        &format!("backlog: Promote draft {id}"),
+        &changed_paths,
+    )
+    .map_err(|error| {
+        format!("Draft {id} was promoted, but the change was not committed: {error}")
+    })?;
+    write_stdout(&format!("Promoted draft {id}\n"))
 }
 
 fn run_draft_create(options: DraftCreateArgs) -> Result<(), String> {
