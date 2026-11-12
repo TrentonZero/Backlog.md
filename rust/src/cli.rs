@@ -4,6 +4,7 @@ use crate::{
     config::{Config, parse_config},
     dependency_graph::{DependencyGraph, DependencyGraphNode},
     discovery::{find_project_root, resolve_backlog_directory},
+    document_store::DocumentStore,
     draft_store::DraftStore,
     identity::{canonical_task_id, normalize_task_id, task_ids_equal},
     milestone_store::MilestoneStore,
@@ -58,6 +59,46 @@ enum Command {
         #[arg(long)]
         plain: bool,
     },
+    /// Document commands.
+    Doc {
+        #[command(subcommand)]
+        command: DocCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum DocCommand {
+    /// List documents in the configured docs directory.
+    List(DocListArgs),
+}
+
+#[derive(Debug, Args)]
+struct ListWindowArgs {
+    /// Print at most this many items after sorting.
+    #[arg(long, allow_hyphen_values = true)]
+    max_count: Option<String>,
+    /// Leave out this many items after sorting.
+    #[arg(long, allow_hyphen_values = true)]
+    skip: Option<String>,
+    /// Print only the number of items in the selected window.
+    #[arg(long)]
+    count: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ListWindow {
+    max_count: Option<usize>,
+    skip: usize,
+    count: bool,
+}
+
+#[derive(Debug, Args)]
+struct DocListArgs {
+    #[command(flatten)]
+    window: ListWindowArgs,
+    /// Use human-readable text output.
+    #[arg(long)]
+    plain: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -119,15 +160,8 @@ struct DraftListArgs {
     /// Sort drafts by priority, ID, or ordinal.
     #[arg(long)]
     sort: Option<String>,
-    /// Print at most this many drafts after sorting.
-    #[arg(long, allow_hyphen_values = true)]
-    max_count: Option<String>,
-    /// Leave out this many drafts after sorting.
-    #[arg(long, allow_hyphen_values = true)]
-    skip: Option<String>,
-    /// Print only the number of drafts in this window.
-    #[arg(long)]
-    count: bool,
+    #[command(flatten)]
+    window: ListWindowArgs,
 }
 
 #[derive(Debug, Subcommand)]
@@ -570,6 +604,9 @@ pub fn run() -> Result<(), String> {
             task_id: None,
             ..
         } => Err("Usage: backlog draft <command> or backlog draft <draftId>".into()),
+        Command::Doc {
+            command: DocCommand::List(options),
+        } => run_document_list(options),
     }
 }
 
@@ -2191,7 +2228,7 @@ fn run_task_list(options: TaskListArgs) -> Result<(), String> {
 }
 
 fn run_draft_list(options: DraftListArgs) -> Result<(), String> {
-    if options.count && options.json {
+    if options.window.count && options.json {
         return Err(
             "--count cannot be combined with --json. Try 'backlog draft list --help' for options."
                 .into(),
@@ -2211,17 +2248,7 @@ fn run_draft_list(options: DraftListArgs) -> Result<(), String> {
             options.sort.as_deref().unwrap()
         ));
     }
-    let max_count = options
-        .max_count
-        .as_deref()
-        .map(parse_draft_max_count)
-        .transpose()?;
-    let skip = options
-        .skip
-        .as_deref()
-        .map(parse_draft_skip)
-        .transpose()?
-        .unwrap_or(0);
+    let window = parse_list_window(&options.window, "backlog draft list")?;
     let context = project_context()?;
     let mut drafts = DraftStore::new(&context.root, &context.backlog_directory)
         .list_drafts()
@@ -2234,8 +2261,10 @@ fn run_draft_list(options: DraftListArgs) -> Result<(), String> {
         context.config.priorities.as_deref().unwrap_or_default(),
     );
     let total = drafts.len();
-    let start = skip.min(total);
-    let end = max_count.map_or(total, |count| start.saturating_add(count).min(total));
+    let start = window.skip.min(total);
+    let end = window
+        .max_count
+        .map_or(total, |count| start.saturating_add(count).min(total));
     let page = &drafts[start..end];
     let next_skip = (end < total).then_some(end);
     let cut = page.len() < total;
@@ -2260,7 +2289,7 @@ fn run_draft_list(options: DraftListArgs) -> Result<(), String> {
         }
         return write_json(&result);
     }
-    if options.count {
+    if window.count {
         return write_stdout(&format!("{}\n", page.len()));
     }
     if page.is_empty() {
@@ -2285,21 +2314,57 @@ fn run_draft_list(options: DraftListArgs) -> Result<(), String> {
         write_stdout(&output)?;
     }
     if cut {
-        let shown = page.len();
-        let range = if shown == 0 {
-            "0".into()
-        } else {
-            format!("{}-{}", start + 1, start + shown)
-        };
-        let footer = if let Some(next) = next_skip {
-            format!(
-                "Showing {range} of {total} items. Next: {}\n",
-                draft_next_command(next)
-            )
-        } else {
-            format!("Showing {range} of {total} items.\n")
-        };
-        write_stdout(&footer)?;
+        write_stdout(&format_list_window_footer(
+            window.skip,
+            page.len(),
+            total,
+            next_skip,
+            "\n",
+        ))?;
+    }
+    Ok(())
+}
+
+fn run_document_list(options: DocListArgs) -> Result<(), String> {
+    let _ = options.plain;
+    let window = parse_list_window(&options.window, "backlog doc list")?;
+    let context = project_context()?;
+    let documents = DocumentStore::new(&context.root, &context.backlog_directory, &context.prefix)
+        .list_documents();
+    let total = documents.len();
+    let start = window.skip.min(total);
+    let end = window
+        .max_count
+        .map_or(total, |count| start.saturating_add(count).min(total));
+    let page = &documents[start..end];
+    let next_skip = (end < total).then_some(end);
+    let cut = page.len() < total;
+
+    if window.count {
+        return write_stdout(&format!("{}\n", page.len()));
+    }
+    if page.is_empty() {
+        if total == 0 {
+            write_stdout("No docs found.\n")?;
+        }
+    } else {
+        let mut output = String::new();
+        for entry in page {
+            output.push_str(&format!(
+                "{} - {}\n",
+                entry.document.id, entry.document.title
+            ));
+        }
+        write_stdout(&output)?;
+    }
+    if cut {
+        write_stdout(&format_list_window_footer(
+            window.skip,
+            page.len(),
+            total,
+            next_skip,
+            "\n",
+        ))?;
     }
     Ok(())
 }
@@ -2530,29 +2595,67 @@ fn commit_created_record(
     }
 }
 
-fn parse_draft_max_count(value: &str) -> Result<usize, String> {
-    let value = value.trim();
-    if value.is_empty()
-        || !value.as_bytes()[0].is_ascii_digit()
-        || value.as_bytes()[0] == b'0'
-        || !value.bytes().all(|byte| byte.is_ascii_digit())
-    {
-        return Err(
-            "--max-count must be a positive integer (1 or greater). Try 'backlog draft list --help' for options.".into(),
-        );
-    }
-    Ok(value.parse::<usize>().unwrap_or(usize::MAX))
+fn parse_list_window(options: &ListWindowArgs, command: &str) -> Result<ListWindow, String> {
+    let help = format!("Try '{command} --help' for options.");
+    let max_count = options
+        .max_count
+        .as_deref()
+        .map(|value| {
+            let value = value.trim();
+            if value.is_empty()
+                || !value.as_bytes()[0].is_ascii_digit()
+                || value.as_bytes()[0] == b'0'
+                || !value.bytes().all(|byte| byte.is_ascii_digit())
+            {
+                return Err(format!(
+                    "--max-count must be a positive integer (1 or greater). {help}"
+                ));
+            }
+            Ok(value.parse::<usize>().unwrap_or(usize::MAX))
+        })
+        .transpose()?;
+    let skip = options
+        .skip
+        .as_deref()
+        .map(|value| {
+            let value = value.trim();
+            if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+                return Err(format!(
+                    "--skip must be a non-negative integer (0 or greater). {help}"
+                ));
+            }
+            Ok(value.parse::<usize>().unwrap_or(usize::MAX))
+        })
+        .transpose()?
+        .unwrap_or(0);
+    Ok(ListWindow {
+        max_count,
+        skip,
+        count: options.count,
+    })
 }
 
-fn parse_draft_skip(value: &str) -> Result<usize, String> {
-    let value = value.trim();
-    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
-        return Err("--skip must be a non-negative integer (0 or greater). Try 'backlog draft list --help' for options.".into());
+fn format_list_window_footer(
+    skip: usize,
+    shown: usize,
+    total: usize,
+    next_skip: Option<usize>,
+    newline: &str,
+) -> String {
+    let range = if shown == 0 {
+        "0".into()
+    } else {
+        format!("{}-{}", skip + 1, skip + shown)
+    };
+    let mut footer = format!("Showing {range} of {total} items.");
+    if let Some(next) = next_skip {
+        footer.push_str(&format!(" Next: {}", list_next_command(next)));
     }
-    Ok(value.parse::<usize>().unwrap_or(usize::MAX))
+    footer.push_str(newline);
+    footer
 }
 
-fn draft_next_command(next_skip: usize) -> String {
+fn list_next_command(next_skip: usize) -> String {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     let mut kept = Vec::new();
     let mut index = 0;

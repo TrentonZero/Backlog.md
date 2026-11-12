@@ -3049,3 +3049,73 @@ fn rust_cli_help_and_version_are_available_without_a_project() {
         }
     }
 }
+
+#[test]
+fn rust_document_list_matches_typescript_order_windows_and_errors() {
+    let project = fixture();
+    project.file(
+        "backlog/docs/doc-10 - Zebra.md",
+        "---\nid: doc-10\ntitle: Zebra\n---\nZebra body\n",
+    );
+    project.file(
+        "backlog/docs/z/doc-4 - Guide.md",
+        "---\nid: doc-4\ntitle: Guide\n---\nGuide Z\n",
+    );
+    project.file(
+        "backlog/docs/a/doc-3 - Guide.md",
+        "---\nid: doc-3\ntitle: Guide\n---\nGuide A\n",
+    );
+    project.file(
+        "backlog/docs/doc-2 - Alpha.md",
+        "---\nid: doc-2\ntitle: Alpha\n---\nAlpha body\n",
+    );
+    project.file(
+        "backlog/docs/README.md",
+        "---\nid: doc-99\ntitle: README\n---\nIgnore\n",
+    );
+    project.file(
+        "backlog/archive/docs/doc-11 - Archived.md",
+        "---\nid: doc-11\ntitle: Archived\n---\nIgnore\n",
+    );
+
+    for args in [
+        &["doc", "list"][..],
+        &["doc", "list", "--plain"][..],
+        &["doc", "list", "--plain", "--max-count", "2"][..],
+        &["doc", "list", "--plain", "--max-count", "2", "--skip", "2"][..],
+        &["doc", "list", "--plain", "--skip", "2"][..],
+        &["doc", "list", "--plain", "--count"][..],
+        &[
+            "doc",
+            "list",
+            "--plain",
+            "--count",
+            "--max-count",
+            "2",
+            "--skip",
+            "1",
+        ][..],
+        &["doc", "list", "--plain", "--max-count", "0"][..],
+        &["doc", "list", "--plain", "--max-count", "-1"][..],
+        &["doc", "list", "--plain", "--skip", "-1"][..],
+        &["doc", "list", "--plain", "--skip", "invalid"][..],
+    ] {
+        let expected = typescript_cli(args, &project.0);
+        let actual = rust_cli(args, &project.0);
+        assert_eq!(
+            actual.status.code(),
+            expected.status.code(),
+            "args: {args:?}"
+        );
+        assert_eq!(actual.stdout, expected.stdout, "args: {args:?}");
+        assert_eq!(actual.stderr, expected.stderr, "args: {args:?}");
+    }
+
+    let empty = fixture();
+    let args = ["doc", "list", "--plain"];
+    let expected = typescript_cli(&args, &empty.0);
+    let actual = rust_cli(&args, &empty.0);
+    assert_eq!(actual.status.code(), expected.status.code());
+    assert_eq!(actual.stdout, expected.stdout);
+    assert_eq!(actual.stderr, expected.stderr);
+}
