@@ -10,6 +10,7 @@ pub mod draft_store;
 pub mod frontmatter;
 pub mod git;
 pub mod identity;
+mod milestone_filtering;
 pub mod milestone_service;
 pub mod milestone_store;
 pub mod readiness;

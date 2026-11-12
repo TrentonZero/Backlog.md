@@ -1,6 +1,9 @@
 //! Shared exact task field filters, separate from fuzzy text search.
 
-use crate::{identity::task_ids_equal, records::TaskRecord};
+use crate::{
+    identity::task_ids_equal,
+    records::{MilestoneRecord, TaskRecord},
+};
 use std::collections::HashSet;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -22,14 +25,18 @@ pub struct TaskFilter {
     pub labels: Vec<String>,
     pub label_match: LabelMatch,
     pub modified_files: Vec<String>,
+    pub milestone: Option<String>,
     pub parent_task_id: Option<String>,
 }
 
 /// Return matching task records in their original order.
+///
+/// Supply active and archived milestones together so aliases resolve across both stores.
 pub fn filter_tasks<'a>(
     tasks: &'a [TaskRecord],
     filter: &TaskFilter,
     prefix: &str,
+    milestones: &[MilestoneRecord],
 ) -> Vec<&'a TaskRecord> {
     let statuses = normalized_set(&filter.statuses, false);
     let excluded_statuses = normalized_set(&filter.exclude_statuses, false);
@@ -48,6 +55,11 @@ pub fn filter_tasks<'a>(
         .parent_task_id
         .as_deref()
         .filter(|parent_id| !parent_id.is_empty());
+    let milestone_matcher = filter
+        .milestone
+        .as_deref()
+        .filter(|query| !query.trim().is_empty())
+        .map(|query| crate::milestone_filtering::MilestoneMatcher::new(query, milestones));
 
     tasks
         .iter()
@@ -127,6 +139,12 @@ pub fn filter_tasks<'a>(
                     .parent_task_id
                     .as_deref()
                     .is_some_and(|task_parent| task_ids_equal(parent_id, task_parent, prefix))
+            {
+                return false;
+            }
+            if milestone_matcher
+                .as_ref()
+                .is_some_and(|matcher| !matcher.matches(task.milestone.as_deref()))
             {
                 return false;
             }

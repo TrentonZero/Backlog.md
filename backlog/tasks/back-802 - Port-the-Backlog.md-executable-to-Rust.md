@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@codex'
 created_date: '2026-11-07T21:53:00Z'
-updated_date: '2026-11-11T23:56:00Z'
+updated_date: '2026-11-12T00:05:00Z'
 labels: []
 dependencies:
   - BACK-801
@@ -115,4 +115,6 @@ BACK-802.33 Port task list ordering to Rust is complete. Added canonical default
 BACK-802.34 Port task list field filters to Rust is complete. Added exact status/exclude, type, project, priority, assignee/unassigned, any/all label, and canonical parent predicates. Filters compose with AND and preserve input order. Fuzzy text, modified files, and milestone resolution remain separate. Rust suite: 175 passed; fmt and Clippy clean; focused TypeScript filters: 32 passed. Reviews found no blockers. Groma remains unavailable.
 
 BACK-802.35 Port task modified-file filters to Rust is complete. TaskFilter now matches trimmed/lowercased path substrings with OR semantics, ignores empty filters and stored paths, and rejects tasks without matching files for effective filters. Live TypeScript parity covers these cases. Rust suite: 175 passed; fmt and Clippy clean; focused TypeScript suite: 5 passed. Reviews found no blockers. Groma remains unavailable.
+
+BACK-802.36 completed: exact Rust milestone filtering now resolves stored IDs, numeric aliases, and titles across the combined active/archive corpus; collision, duplicate-title, blank-query, and no-milestone semantics are covered by live TypeScript parity. Full Rust suite, clippy, TypeScript milestone filter suites (27 tests), formatting, and diff checks passed. Cold simplicity and complexity reviews cleared the implementation. Groma agent-instructions remains unavailable in this environment.
 <!-- SECTION:NOTES:END -->
